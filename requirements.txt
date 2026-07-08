@@ -1,0 +1,9 @@
+litgpt[all]
+huggingface_hub==0.33.2
+transformers
+lm-eval==0.4.2
+tiktoken
+typing_extensions>=4.10.0
+ipython
+tiktoken
+matplotlib

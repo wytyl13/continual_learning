@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  continual_learning:
+    container_name: continual_learning
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    
+    image: litgpt-qwen-env:v1
+    ipc: host
+    network_mode: host
+    volumes:
+      - /mnt/wsl/fast_disk/docker_data/models:/continual_learning/models
+      - ./:/continual_learning
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: ["tail", "-f", "/dev/null"]
