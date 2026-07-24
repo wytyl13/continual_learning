@@ -9,7 +9,7 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True" # export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 import torch
 import tiktoken
-from chapter4_gpt_model import GPTModel, generate_text_simple
+from examples.book_chapter.chapter4_gpt_model import GPTModel, generate_text_simple
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -282,7 +282,7 @@ if __name__ == "__main__":
     train_data = text_data[:split_idx]
     val_data = text_data[split_idx:]
 
-    from chapter2_dataloader import create_dataloader_v1
+    from examples.book_chapter.chapter2_dataloader import create_dataloader_v1
     train_loader = create_dataloader_v1(
         train_data,
         batch_size=2,

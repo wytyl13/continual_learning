@@ -10,9 +10,9 @@ Coding the gpt model.
 import torch
 import torch.nn as nn
 
-from chapter4_layer_norm import GPT_CONFIG_124M, GPT_CONFIG_MEDIUM, GPT_CONFIG_LARGE, GPT_CONFIG_XL
-from chapter4_transformer_block import TransformerBlock
-from chapter4_layer_norm import LayerNorm
+from examples.book_chapter.chapter4_layer_norm import GPT_CONFIG_124M, GPT_CONFIG_MEDIUM, GPT_CONFIG_LARGE, GPT_CONFIG_XL
+from examples.book_chapter.chapter4_transformer_block import TransformerBlock
+from examples.book_chapter.chapter4_layer_norm import LayerNorm
 
 class GPTModel(nn.Module):
     """

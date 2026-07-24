@@ -109,9 +109,9 @@ print(f"当前使用的显卡：{torch.cuda.get_device_name(0)}")
 
 
 
-from chapter3_multi_head_attention import MultiHeadAttention
-from chapter4_layer_norm import GPT_CONFIG_124M, LayerNorm
-from chapter4_feed_forward import FeedForward
+from examples.book_chapter.chapter3_multi_head_attention import MultiHeadAttention
+from examples.book_chapter.chapter4_layer_norm import GPT_CONFIG_124M, LayerNorm
+from examples.book_chapter.chapter4_feed_forward import FeedForward
 
 
 class TransformerBlock(nn.Module):

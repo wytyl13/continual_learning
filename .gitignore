@@ -3,3 +3,16 @@ models/
 __pycache__/
 data/
 *.png
+rope.txt
+gpt2/
+*.pth
+source/
+out/
+.claude/
+*.pyc
+*.safetensors
+.ipynb_checkpoints/
+*.egg-info/
+dist/
+build/
+docs/

@@ -27,7 +27,7 @@ of the input items. Once the model determines which keys are most relevant to th
 
 import torch
 
-from chapter2_dataloader import create_dataloader_v1
+from examples.book_chapter.chapter2_dataloader import create_dataloader_v1
 
 with open("The_Verdict.txt", encoding="utf-8") as f:
         raw_text = f.read()
