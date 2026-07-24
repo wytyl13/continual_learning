@@ -10,7 +10,7 @@
 if __name__ == "__main__":
     import tiktoken
     from transformers import AutoTokenizer
-
+    from config import SOURCE_DIR
 
     # gpt2
     enc = tiktoken.get_encoding("gpt2")
@@ -20,7 +20,7 @@ if __name__ == "__main__":
     # hugginface tokenizer
     """
     # gpt2
-    tokenizer = AutoTokenizer.from_pretrained("/mnt/wsl/fast_disk/continual_learning/source/hf/gpt2/124M") 
+    tokenizer = AutoTokenizer.from_pretrained(f"{SOURCE_DIR}/hf/gpt2/124M") 
     print(tokenizer.eos_token_id)
     print(tokenizer.eos_token)
     

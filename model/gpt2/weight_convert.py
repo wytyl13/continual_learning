@@ -476,7 +476,7 @@ def convert_custom_to_hf(custom_state_dict: dict, num_layers: int) -> dict:
     huggingface gpt2模型架构
     格式为以下代码输出
     from transformers import GPT2LMHeadModel
-    hf_model = GPT2LMHeadModel.from_pretrained("/mnt/wsl/fast_disk/continual_learning/source/hf/gpt2/124M")
+    hf_model = GPT2LMHeadModel.from_pretrained(f"{SOURCE_DIR}/hf/gpt2/124M")
     print(hf_model)
     ================================================================================
     GPT2LMHeadModel(
@@ -579,6 +579,7 @@ def convert_custom_to_hf(custom_state_dict: dict, num_layers: int) -> dict:
 if __name__ == "__main__":
     import tiktoken
     from model.gpt2.model import GPTConfig, GPTForCausalLM
+    from config import SOURCE_DIR, OUT_DIR
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = tiktoken.get_encoding("gpt2")
@@ -592,7 +593,7 @@ if __name__ == "__main__":
 
     # OpenAI格式
     from model.gpt2.gpt_download import download_and_load_gpt2
-    _, openai_params = download_and_load_gpt2("124M", models_dir="/mnt/wsl/fast_disk/continual_learning/source/trf/gpt2")
+    _, openai_params = download_and_load_gpt2("124M", models_dir=f"{SOURCE_DIR}/trf/gpt2")
     print("=" * 80)
     print("OpenAI 格式：")
     print("=" * 80)
@@ -606,7 +607,7 @@ if __name__ == "__main__":
     
     # 输出huggingface模型架构
     from transformers import GPT2LMHeadModel
-    hf_model = GPT2LMHeadModel.from_pretrained("/mnt/wsl/fast_disk/continual_learning/source/hf/gpt2/124M")
+    hf_model = GPT2LMHeadModel.from_pretrained(f"{SOURCE_DIR}/hf/gpt2/124M")
     print("\n" + "=" * 80)
     print(hf_model)
     print("=" * 80)

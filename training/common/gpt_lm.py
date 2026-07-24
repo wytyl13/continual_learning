@@ -6,9 +6,10 @@
 @File    : gpt_lm.py
 """
 
+from tokenizers import Tokenizer
+
 from lm_eval.api.model import LM
 import torch
-import tiktoken
 import torch.nn.functional as F
 
 
@@ -31,35 +32,25 @@ class GPT2LM(LM):
         Args:
             model: 模型实例（可以是自定义的 GPTModel 或 transformers 的 GPT2LMHeadModel）
             device: 设备
-            tokenizer: 可选的 tokenizer（如果为 None，则使用 tiktoken）
-                      支持任意实现了 .encode() 和 .decode() 方法的 tokenizer
-            model_name: tokenizer 名称（仅当 tokenizer=None 时使用）
+            tokenizer: tokenizer 实例（必须提供）
+            model_name: 模型名称（保留参数，未使用）
             context_length: 上下文长度
             vocab_size: 词表大小
             max_gen_toks: 最大生成 token 数
             batch_size: 批次大小
 
         使用示例：
-            # 方式1：自定义模型 + tiktoken（原有方式）
-            lm = GPT2LM(model=custom_model, device=device)
-
-            # 方式2：transformers 模型 + transformers tokenizer
-            from transformers import GPT2LMHeadModel, GPT2Tokenizer
-            model = GPT2LMHeadModel.from_pretrained("gpt2")
-            tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+            from tokenizers import Tokenizer
+            model = GPTForCausalLM.from_pretrained(...)
+            tokenizer = Tokenizer.from_pretrained("gpt2")
             lm = GPT2LM(model=model, device=device, tokenizer=tokenizer)
         """
         super().__init__()
         self.model = model.to(device).eval()
         self._device = device
-
-        # 灵活的 tokenizer 初始化
-        if tokenizer is not None:
-            # 使用传入的 tokenizer（transformers 或其他）
-            self.tokenizer = tokenizer
-        else:
-            # 使用 tiktoken（向后兼容原有代码）
-            self.tokenizer = tiktoken.get_encoding(model_name)
+        self.tokenizer = Tokenizer.from_pretrained(model_name) if tokenizer is None else tokenizer
+        if self.tokenizer is None:
+            raise ValueError("tokenizer must be provided")
 
         self.context_length = context_length
         self.vocab_size = vocab_size
@@ -84,7 +75,8 @@ class GPT2LM(LM):
         return self._batch_size
     
     def tok_encode(self, string: str):
-        return self.tokenizer.encode(string)
+        encoded = self.tokenizer.encode(string).ids
+        return encoded
     
     def tok_decode(self, tokens):
         return self.tokenizer.decode(tokens)

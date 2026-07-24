@@ -12,6 +12,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+from safetensors.torch import save_file
+from dataclasses import asdict
 
 from training.common.logger import get_logger
 
@@ -19,7 +21,7 @@ logger = get_logger(__name__)
 
 
 def text_to_token_ids(text, tokenizer):
-    encoded = tokenizer.encode(text, allowed_special={'<|endoftext|>'})
+    encoded = tokenizer.encode(text).ids
     # 增加批次维度用于模型推理
     encoded_tensor = torch.tensor(encoded).unsqueeze(0)
     return encoded_tensor
@@ -200,26 +202,33 @@ def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
     plt.savefig("loss_plot.png", dpi=300, bbox_inches="tight")
 
 
-def save_model(model, save_dir):
-      """保存模型（推荐格式）"""
+def save_model(model, save_dir, tokenizer=None):
       os.makedirs(save_dir, exist_ok=True)
 
-      # 保存权重
-      torch.save(model.state_dict(), f"{save_dir}/pytorch_model.bin")
+      # 保存权重，处理共享权重
+      state_dict = model.state_dict()
+      # 如果有weight tying，复制一份lm_head.weight避免共享内存
+      if hasattr(model, 'cfg') and model.cfg.tie_word_embeddings:
+          state_dict['lm_head.weight'] = state_dict['lm_head.weight'].clone()
+      save_file(state_dict, f"{save_dir}/model.safetensors")
 
-      # 保存配置（JSON格式，与HF兼容）
-      config_dict = {
-          "vocab_size": model.cfg.vocab_size,
-          "hidden_size": model.cfg.hidden_size,
-          "intermediate_size": model.cfg.intermediate_size,
-          "num_hidden_layers": model.cfg.num_hidden_layers,
-          "num_attention_heads": model.cfg.num_attention_heads,
-          "max_position_embeddings": model.cfg.max_position_embeddings,
-          "qkv_bias": model.cfg.qkv_bias,
-      }
+      # 保存config
+      config_dict = asdict(model.cfg)
       with open(f"{save_dir}/config.json", "w") as f:
           json.dump(config_dict, f, indent=2)
-      logger.info(f"Val loss improved, model saved to {save_dir}")
+
+      # 保存tokenizer
+      if tokenizer is not None:
+          if hasattr(tokenizer, 'save'):  # tokenizers库
+              tokenizer.save(f"{save_dir}/tokenizer.json")
+              logger.info(f"Tokenizer saved: {save_dir}/tokenizer.json")
+          elif hasattr(tokenizer, 'save_pretrained'):  # transformers库
+              tokenizer.save_pretrained(save_dir)
+              logger.info(f"Tokenizer saved: {save_dir}")
+          else:
+              logger.warning(f"tokenizer类型 {type(tokenizer)} 不支持保存")
+
+      logger.info(f"Model saved: {save_dir}")
 
 
 def train_model(model, train_loader, val_loader,
@@ -289,7 +298,7 @@ def train_model(model, train_loader, val_loader,
                 if  val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0
-                    save_model(model, save_dir)
+                    save_model(model, save_dir, tokenizer)
                     
                 else:
                     patience_counter += 1

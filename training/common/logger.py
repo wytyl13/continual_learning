@@ -12,6 +12,11 @@ import sys
 def get_logger(name: str, log_file: str = None, level=logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)
+    logger.propagate = False  # 防止消息传递到父 logger
+
+    # 避免重复添加 handler
+    if logger.handlers:
+        return logger
 
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",

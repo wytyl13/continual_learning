@@ -42,13 +42,6 @@ GPT 架构完整实现。
 """
 import os
 import json
-os.environ["http_proxy"] = "http://127.0.0.1:7890"
-os.environ["https_proxy"] = "http://127.0.0.1:7890"
-os.environ["HTTP_PROXY"] = "http://127.0.0.1:7890"
-os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7890"
-
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import math
 from dataclasses import dataclass
@@ -664,14 +657,9 @@ class GPTForCausalLM(nn.Module):
                 - 规格名称: "124M", "355M", "774M", "1558M"
                 - 或模型目录路径: "/path/to/gpt2/124M"
             models_dir: 当使用规格名称时的缓存目录
-            
-            
         
         """
-        try:
-            from .gpt_download import download_and_load_gpt2  # 作为包导入
-        except ImportError:
-            from model.gpt2.gpt_download import download_and_load_gpt2
+        from model.gpt2.gpt_download import download_and_load_gpt2
         
         # 规格名称 → 配置映射
         size_map = {
@@ -688,11 +676,6 @@ class GPTForCausalLM(nn.Module):
             config.qkv_bias = True
 
             # 下载并加载权重
-            try:
-                from .gpt_download import download_and_load_gpt2
-            except ImportError:
-                from model.gpt2.gpt_download import download_and_load_gpt2
-
             _, params = download_and_load_gpt2(model_name_or_path, models_dir)
         
         # ── 情况2: 传入的是模型路径 ──────────────────────────
@@ -750,36 +733,54 @@ class GPTForCausalLM(nn.Module):
 
     @classmethod
     def _from_pt(cls, model_name_or_path: str, map_location: Optional[Union[str, torch.device]] = "cpu"):
-        """从自定义pt格式加载
+        """从自定义格式加载
 
         Args:
             model_name_or_path: 模型路径
             map_location: 设备映射位置，默认 "cpu"
+
+        支持格式：
+        - 优先加载 model.safetensors
+        - 兼容 pytorch_model.bin / .pt
         """
         import os
         import json
-
-        # 支持两种格式：
-        # 1. 目录格式: model_path/pytorch_model.bin + model_path/config.json
-        # 2. 文件格式: model_path.pt + model_path_config.json
+        from safetensors.torch import load_file
 
         if os.path.isdir(model_name_or_path):
             config_file = os.path.join(model_name_or_path, "config.json")
-            weight_file = os.path.join(model_name_or_path, "pytorch_model.bin")
+
+            # 优先safetensors，fallback到bin
+            safetensors_file = os.path.join(model_name_or_path, "model.safetensors")
+            bin_file = os.path.join(model_name_or_path, "pytorch_model.bin")
+
+            if os.path.exists(safetensors_file):
+                weight_file = safetensors_file
+                use_safetensors = True
+            elif os.path.exists(bin_file):
+                weight_file = bin_file
+                use_safetensors = False
+            else:
+                raise FileNotFoundError(f"找不到权重文件: {safetensors_file} 或 {bin_file}")
         else:
-            config_file = model_name_or_path.replace(".pt", "_config.json").replace(".bin", "_config.json")
+            # 文件格式
+            config_file = model_name_or_path.replace(".pt", "_config.json").replace(".bin", "_config.json").replace(".safetensors", "_config.json")
             weight_file = model_name_or_path
-        
+            use_safetensors = weight_file.endswith(".safetensors")
+
         # 读取配置
         if not os.path.exists(config_file):
             raise FileNotFoundError(f"配置文件不存在: {config_file}")
-        
+
         with open(config_file) as f:
             config_dict = json.load(f)
         config = GPTConfig(**config_dict)
-        
-        # 加载权重，使用自定义的 map_location
-        state_dict = torch.load(weight_file, map_location=map_location, weights_only=False)
+
+        # 加载权重
+        if use_safetensors:
+            state_dict = load_file(weight_file)
+        else:
+            state_dict = torch.load(weight_file, map_location=map_location, weights_only=False)
 
         model = cls(config)
         model.load_state_dict(state_dict)
@@ -794,9 +795,11 @@ if __name__ == "__main__":
     """
     # 模型初始化测试
     """
-    import tiktoken
+    from config import SOURCE_DIR, OUT_DIR
+    from tokenizers import Tokenizer
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = tiktoken.get_encoding("gpt2")
+    tokenizer = Tokenizer.from_pretrained("gpt2")
     cfg = GPTConfig.gpt2_small()
     torch.manual_seed(123)
     model = GPTForCausalLM(cfg)
@@ -806,21 +809,22 @@ if __name__ == "__main__":
     """
     # 加载权重测试
     """
-    load_pretrained_mode = 1 # 1: scratch, 2: load_pretrained, 3: load_continual_learning
+    load_pretrained_mode = 3 # 1: scratch, 2: load_pretrained, 3: load_continual_learning
     if load_pretrained_mode == 2:
         # model = GPTForCausalLM.from_pretrained("124M", source="openai")
         # 注意map_location和.to(device)的区别，前者一般是初始化模型权重的时候加载，后者一般是在运行的时候加载
-        model = GPTForCausalLM.from_pretrained("/mnt/wsl/fast_disk/continual_learning/source/trf/gpt2/124M", source="openai", map_location=device)
-        # model = GPTForCausalLM.from_pretrained("/mnt/wsl/fast_disk/continual_learning/source/hf/gpt2/124M", source="hf", map_location=device)
+        # model = GPTForCausalLM.from_pretrained(model_name_or_path="124M", source="openai", model_dir=f"{SOURCE_DIR}/trf/gpt2", map_location=device)
+        # model = GPTForCausalLM.from_pretrained(f"{SOURCE_DIR}/trf/gpt2/124M", source="openai", map_location=device)
+        model = GPTForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/gpt2/124M", source="hf", map_location=device)
     elif load_pretrained_mode == 3:
-        model = GPTForCausalLM.from_pretrained("/mnt/wsl/fast_disk/continual_learning/out/train_simple_20260722", source="pt", map_location=device)
+        model = GPTForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260722", source="pt", map_location=device)
     
     
     """
     # 前向测试
     """
     texts = ["Every effort moves you", "Every day holds a"]
-    batch = torch.stack([torch.tensor(tokenizer.encode(t)) for t in texts]).to(device)
+    batch = torch.stack([torch.tensor(tokenizer.encode(t).ids) for t in texts]).to(device)
     # forward test
     logits = model(batch)
     print(f"Input shape:  {batch.shape}")
@@ -838,7 +842,7 @@ if __name__ == "__main__":
     # 生成测试
     """
     model.eval()
-    prompt = torch.tensor(tokenizer.encode("Hello, I am")).unsqueeze(0).to(device) # (3,) -> (1, 3)
+    prompt = torch.tensor(tokenizer.encode("Hello, I am").ids).unsqueeze(0).to(device) # (3,) -> (1, 3)
     out = model.generate(prompt, max_new_tokens=50, top_k=50, temperature=0.8) # (1, 3) -> (1, 13)
     print(f"\nGenerated: {tokenizer.decode(out[0].tolist())}") # (1, 13) -> (13,) -> list -> str
     

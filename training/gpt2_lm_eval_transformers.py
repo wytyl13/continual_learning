@@ -12,7 +12,7 @@ from transformers import GPT2LMHeadModel, GPT2Config
 
 from training import GPT2LM
 from model.gpt2.weight_convert import convert_custom_to_hf
-
+from config import SOURCE_DIR, OUT_DIR
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -29,13 +29,13 @@ if __name__ == "__main__":
     # 加载权重
     if load_pretrained_mode == 3:
         # 加载持续学习权重（需要转换格式）
-        custom_sd = torch.load("/mnt/wsl/fast_disk/continual_learning/out/train_simple_20260722/pytorch_model.bin", weights_only=True) 
+        custom_sd = torch.load(f"{OUT_DIR}/train_simple_20260722/pytorch_model.bin", weights_only=True) 
         hf_sd = convert_custom_to_hf(custom_sd, num_layers=12)
         model.load_state_dict(hf_sd)
         bootstrap_iters=100
     elif load_pretrained_mode == 2:
         # 加载官方预训练权重
-        model = GPT2LMHeadModel.from_pretrained("/mnt/wsl/fast_disk/continual_learning/source/hf/gpt2/124M")
+        model = GPT2LMHeadModel.from_pretrained(f"{SOURCE_DIR}/hf/gpt2/124M")
         bootstrap_iters=100
 
     # 评估（使用 tiktoken，与自定义评估保持一致）

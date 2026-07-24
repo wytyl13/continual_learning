@@ -11,7 +11,7 @@ services:
     ipc: host
     network_mode: host
     volumes:
-      - /mnt/wsl/fast_disk/docker_data/models:/continual_learning/models
+      - ${BASE_DIR}:${BASE_DIR}
       - ./:/continual_learning
     deploy:
       resources:

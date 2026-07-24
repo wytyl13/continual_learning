@@ -8,7 +8,6 @@
 
 import torch
 from torch.utils.data import Dataset, DataLoader
-import tiktoken
 from typing import Any
 
 class PretrainDataset(Dataset):
@@ -23,7 +22,7 @@ class PretrainDataset(Dataset):
         self.input_ids = []
         self.target_ids = []
 
-        token_ids = tokenizer.encode(txt)
+        token_ids = tokenizer.encode(txt).ids
         for i in range(0, len(token_ids) - max_length, stride):
             # 构建训练数据：[0, 1, 2, 3]
             input_chunk = token_ids[i:i+max_length]
