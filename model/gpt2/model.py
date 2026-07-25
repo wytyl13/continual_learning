@@ -108,17 +108,17 @@ class GPTConfig:
     @classmethod
     def gpt2_medium(cls) -> "GPTConfig":
         """355M 参数"""
-        return cls(max_position_embeddings=1024, num_attention_heads=16, num_key_value_heads=16, num_hidden_layers=24)
+        return cls(hidden_size=1024, num_attention_heads=16, num_key_value_heads=16, num_hidden_layers=24)
 
     @classmethod
     def gpt2_large(cls) -> "GPTConfig":
         """774M 参数"""
-        return cls(max_position_embeddings=1280, num_attention_heads=20, num_key_value_heads=20, num_hidden_layers=36)
+        return cls(hidden_size=1280, num_attention_heads=20, num_key_value_heads=20, num_hidden_layers=36)
 
     @classmethod
     def gpt2_xl(cls) -> "GPTConfig":
         """1.5B 参数"""
-        return cls(max_position_embeddings=1600, num_attention_heads=25, num_key_value_heads=25, num_hidden_layers=48)
+        return cls(hidden_size=1600, num_attention_heads=25, num_key_value_heads=25, num_hidden_layers=48)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -710,10 +710,10 @@ class GPTForCausalLM(nn.Module):
                 intermediate_size=hparams["n_embd"] * 4,
                 num_hidden_layers=hparams["n_layer"],
                 num_attention_heads=hparams["n_head"],
+                num_key_value_heads=hparams["n_head"],
                 max_position_embeddings=hparams["n_ctx"],
                 qkv_bias=True,
             )
-
             # 2.3 加载checkpoint权重
             from model.gpt2.gpt_download import load_gpt2_params_from_tf_ckpt
             params = load_gpt2_params_from_tf_ckpt(model_path, hparams)
@@ -800,7 +800,7 @@ if __name__ == "__main__":
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = Tokenizer.from_pretrained("gpt2")
-    cfg = GPTConfig.gpt2_small()
+    cfg = GPTConfig.gpt2_medium()
     torch.manual_seed(123)
     model = GPTForCausalLM(cfg)
     model.to(device)
@@ -809,13 +809,13 @@ if __name__ == "__main__":
     """
     # 加载权重测试
     """
-    load_pretrained_mode = 3 # 1: scratch, 2: load_pretrained, 3: load_continual_learning
+    load_pretrained_mode = 2 # 1: scratch, 2: load_pretrained, 3: load_continual_learning
     if load_pretrained_mode == 2:
         # model = GPTForCausalLM.from_pretrained("124M", source="openai")
         # 注意map_location和.to(device)的区别，前者一般是初始化模型权重的时候加载，后者一般是在运行的时候加载
-        # model = GPTForCausalLM.from_pretrained(model_name_or_path="124M", source="openai", model_dir=f"{SOURCE_DIR}/trf/gpt2", map_location=device)
-        # model = GPTForCausalLM.from_pretrained(f"{SOURCE_DIR}/trf/gpt2/124M", source="openai", map_location=device)
-        model = GPTForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/gpt2/124M", source="hf", map_location=device)
+        # model = GPTForCausalLM.from_pretrained(model_name_or_path="355M", source="openai", model_dir=f"{SOURCE_DIR}/trf/gpt2", map_location=device)
+        model = GPTForCausalLM.from_pretrained(f"{SOURCE_DIR}/trf/gpt2/355M", source="openai", map_location=device)
+        # model = GPTForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/gpt2/355M", source="hf", map_location=device)
     elif load_pretrained_mode == 3:
         model = GPTForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260722", source="pt", map_location=device)
     

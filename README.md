@@ -13,12 +13,19 @@ Word embeddings can have varing dimensions, from one to thousands. A higher dime
 While we can use pretrained models such as Word2Vec to generate embeddings for machine learning models, LLMs commonly produce their own embeddings that are part of the input layer and are updated during training. The advantage of optimizing the embeddings as part of the LLM training instead of using Word2Vec is that the embeddings are optimized to the specific task and data at hand.
 
 export http_proxy="http://127.0.0.1:7890" https_proxy="http://127.0.0.1:7890" ftp_proxy="http://127.0.0.1:7890" all_proxy="socks5://127.0.0.1:7890" HTTP_PROXY="http://127.0.0.1:7890" HTTPS_PROXY="http://127.0.0.1:7890" FTP_PROXY="http://127.0.0.1:7890" ALL_PROXY="socks5://127.0.0.1:7890"
+
 unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY 
 
 pip install -U huggingface_hub
 HF_ENDPOINT=https://hf-mirror.com huggingface-cli download openai-community/gpt2 \
   --local-dir /mnt/wsl/fast_disk/continual_learning/source/hf/gpt2/124M \
   --include "*.safetensors" "*.json" "*.txt" "*.model"
+
+
+HF_ENDPOINT=https://hf-mirror.com huggingface-cli download openai-community/gpt2-medium \
+  --local-dir /mnt/wsl/fast_disk/continual_learning/source/hf/gpt2/355M \
+  --include "*.safetensors" "*.json" "*.txt" "*.model"
+
 
 HF_ENDPOINT=https://hf-mirror.com huggingface-cli download openai-community/gpt2 \
   --local-dir /root/autodl-tmp/continual_learning_data/source/hf \

@@ -27,11 +27,11 @@ logger = get_logger(__name__)
 if __name__ == "__main__":
     # 初始化模型
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    load_pretrained_mode = 3 # 1: scratch, 2: load_pretrained, 3: load_continual_learning
+    load_pretrained_mode = 1 # 1: scratch, 2: load_pretrained, 3: load_continual_learning
     gpt_cfg = None
     tokenizer = Tokenizer.from_pretrained("gpt2") # 只下载hf格式的tokenizer.json文件
     context_length = 256
-    gpt_cfg: GPTConfig = GPTConfig.gpt2_small()
+    gpt_cfg: GPTConfig = GPTConfig.gpt2_medium()
     model = GPTForCausalLM(gpt_cfg)
     model.to(device)
     # 加载模型权重
@@ -44,13 +44,13 @@ if __name__ == "__main__":
         
         # tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/gpt2/124M/tokenizer.json") # 效果等同于Tokenizer.from_pretrained("gpt2")
         model = GPTForCausalLM.from_pretrained(
-            f"{SOURCE_DIR}/hf/gpt2/124M", 
+            f"{SOURCE_DIR}/hf/gpt2/355M", 
             source="hf",
             map_location=device
         )
     elif load_pretrained_mode == 3:
         # tokenizer = Tokenizer.from_file(f"{OUT_DIR}/train_simple_20260722/tokenizer.json") # 如果没有新增或删除，效果等同于Tokenizer.from_pretrained("gpt2")
-        model = GPTForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260722", source="pt", map_location=device)    
+        model = GPTForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260725_gpt2_355M", source="pt", map_location=device)    
 
     # 初始化训练数据
     with open(f"{SOURCE_DIR}/the-verdict.txt") as f:
@@ -97,7 +97,7 @@ if __name__ == "__main__":
         generate_sample_temperature=0.8,
         generate_sample_top_k=50,
         patience=3,
-        save_dir=f"{OUT_DIR}/train_simple_20260722"
+        save_dir=f"{OUT_DIR}/train_simple_20260725_gpt2_355M"
     )
 
 
