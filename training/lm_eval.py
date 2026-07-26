@@ -3,7 +3,8 @@
 """
 @Time    : 2026/07/21 18:37
 @Author  : weiyutao
-@File    : gpt2_lm_eval.py
+@File    : lm_eval.py
+
 """
 
 import lm_eval

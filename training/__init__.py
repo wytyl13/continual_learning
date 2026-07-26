@@ -18,7 +18,6 @@ from .common.dataset_base import (
     PretrainDataset,
     create_dataloader
 )
-from .common.logger import get_logger
 from .common.gpt_lm import GPT2LM
 
 
@@ -33,6 +32,5 @@ __all__ = [
     'train_model',
     'PretrainDataset',
     'create_dataloader',
-    'get_logger',
     'GPT2LM'
 ]

@@ -15,7 +15,8 @@ from matplotlib.ticker import MaxNLocator
 from safetensors.torch import save_file
 from dataclasses import asdict
 
-from training.common.logger import get_logger
+from model.gpt2.model import ModelType
+from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -45,6 +46,11 @@ def calc_loss_batch(input_batch, target_batch, model, device):
 
     # iuput(batch, seq_length) -> out(batch, seq_length, vocab_size)
     logits = model(input_batch)
+    
+    if hasattr(logits, 'logits'):
+        logits = logits.logits
+    else:
+        logits = logits
     
     # logits.flatten(0, 1): input(batch, seq_length, vocab_size) -> output(batch*seq_length, vocab_size)
     # target_batch.flatten(): input(batch, seq_length) -> output(batch*seq_length,)
@@ -138,7 +144,7 @@ def generate_text_simple(model, idx, max_new_tokens, context_size, temperature=1
 
 
 def generate_and_print_sample(model, tokenizer, device, start_context, context_size,
-                              max_new_tokens=50, temperature=1.0, top_k=None):
+                              max_new_tokens=50, temperature=1.0, top_k=None, model_type=ModelType.CUSTOM):
     """
     生成并打印文本样本。
 
@@ -159,8 +165,21 @@ def generate_and_print_sample(model, tokenizer, device, start_context, context_s
     encoded = text_to_token_ids(start_context, tokenizer).to(device)
 
     with torch.no_grad():
+        if model_type == ModelType.TRANSFORMERS:
+            # transformers 模型使用 GenerationConfig
+            attention_mask = torch.ones_like(encoded)
+            token_ids = model.generate(
+                input_ids=encoded,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=50256,
+                eos_token_id=50256,
+                do_sample=temperature > 0,
+                temperature=temperature if temperature > 0 else 1.0,
+                top_k=top_k if top_k and temperature > 0 else 50
+            )
         # 检查模型是否有自己的 generate 方法
-        if hasattr(model, 'generate') and callable(getattr(model, 'generate')):
+        elif hasattr(model, 'generate') and callable(getattr(model, 'generate')):
             # 使用模型自己的 generate 方法
             token_ids = model.generate(
                 encoded,
@@ -208,12 +227,19 @@ def save_model(model, save_dir, tokenizer=None):
       # 保存权重，处理共享权重
       state_dict = model.state_dict()
       # 如果有weight tying，复制一份lm_head.weight避免共享内存
-      if hasattr(model, 'cfg') and model.cfg.tie_word_embeddings:
-          state_dict['lm_head.weight'] = state_dict['lm_head.weight'].clone()
+      config = getattr(model, 'cfg', None) or getattr(model, 'config', None)
+      if config and getattr(config, 'tie_word_embeddings', False):
+          if 'lm_head.weight' in state_dict:
+            state_dict['lm_head.weight'] = state_dict['lm_head.weight'].clone()
       save_file(state_dict, f"{save_dir}/model.safetensors")
 
       # 保存config
-      config_dict = asdict(model.cfg)
+      if config:
+        # 兼容dataclass和transformers config
+        if hasattr(config, 'to_dict'):  # transformers config
+            config_dict = config.to_dict()
+        else:  # dataclass
+            config_dict = asdict(config)
       with open(f"{save_dir}/config.json", "w") as f:
           json.dump(config_dict, f, indent=2)
 
@@ -235,7 +261,7 @@ def train_model(model, train_loader, val_loader,
                 optimizer, device, num_epochs,
                 eval_freq, eval_iter, start_context, context_size, tokenizer,
                 generate_sample_temperature=1.0, generate_sample_top_k=None,
-                patience=5, save_dir="best_model.pt"):
+                patience=5, save_dir="best_model.pt", model_type="gpt2"):
     """
     通用的模型训练函数。
 
@@ -311,7 +337,8 @@ def train_model(model, train_loader, val_loader,
             model, tokenizer, device, start_context, 
             context_size,
             temperature=generate_sample_temperature,
-            top_k=generate_sample_top_k
+            top_k=generate_sample_top_k,
+            model_type=model_type
         )
 
     return train_losses, val_losses, track_token_seen

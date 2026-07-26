@@ -54,71 +54,13 @@ import torch.nn.functional as F
 from dataclasses import dataclass, field
 from safetensors.torch import load_file
 
-from training import get_logger
-from model.gpt2.weight_convert import convert_safetensors_to_custom, convert_openai_to_custom
 
+from model.gpt2.weight_convert import convert_safetensors_to_custom, convert_openai_to_custom
+from model.gpt2.config import GPTConfig
+from utils.logger import get_logger
+from utils.enums import ModelType, LoadMode
 
 logger = get_logger(__name__)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class GPTConfig:
-    """GPT 模型配置。
-
-    设计参考 transformers 库的 PretrainedConfig，但简化为 dataclass：
-    - 所有超参数都有默认值，对应 GPT-2 Small（124M）
-    - 通过类方法快速创建各尺寸预设
-
-    使用方式：
-        cfg = GPTConfig()                    # GPT-2 Small（默认）
-        cfg = GPTConfig.gpt2_medium()        # GPT-2 Medium
-        cfg = GPTConfig(num_layers=6)        # 自定义
-    """
-    vocab_size: int = 50257       # GPT-2 tokenizer 词表大小
-    hidden_size: int = 768      # 词向量维度，同时也是所有层的宽度
-    intermediate_size: Optional[int] = None # 默认None，表示自动计算
-    max_position_embeddings: int = 1024    # 最大序列长度（位置编码的上限）
-    num_attention_heads: int = 12           # 注意力头数，head_dim = hidden_size / num_attention_heads = 64
-    num_key_value_heads: int = 12
-    num_hidden_layers: int = 12          # Transformer 块堆叠层数
-    layer_norm_epsilon: float = 1e-5
-    embd_pdrop: float = 0.1
-    resid_pdrop: float = 0.1
-    attn_pdrop: float = 0.1
-    activation_function: str = "gelu_new"
-    tie_word_embeddings: bool = True
-    qkv_bias: bool = True        # Q/K/V 投影是否带 bias（原始 GPT-2 为 True，现代模型倾向 False）
-
-    # ── 预设配置 ──────────────────────────────────────────────────────────────
-
-    def __post_init__(self):
-          """实例化后自动计算intermediate_size"""
-          if self.intermediate_size is None:
-              self.intermediate_size = self.hidden_size * 4
-
-    @classmethod
-    def gpt2_small(cls) -> "GPTConfig":
-        """124M 参数（不含 output head 权重绑定）"""
-        return cls()
-
-    @classmethod
-    def gpt2_medium(cls) -> "GPTConfig":
-        """355M 参数"""
-        return cls(hidden_size=1024, num_attention_heads=16, num_key_value_heads=16, num_hidden_layers=24)
-
-    @classmethod
-    def gpt2_large(cls) -> "GPTConfig":
-        """774M 参数"""
-        return cls(hidden_size=1280, num_attention_heads=20, num_key_value_heads=20, num_hidden_layers=36)
-
-    @classmethod
-    def gpt2_xl(cls) -> "GPTConfig":
-        """1.5B 参数"""
-        return cls(hidden_size=1600, num_attention_heads=25, num_key_value_heads=25, num_hidden_layers=48)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,11 +73,52 @@ class LayerNorm(nn.Module):
     GPT 使用 LayerNorm（跨特征维度归一化），而 LLaMA 改用 RMSNorm（去掉均值中心化，更快）。
     LayerNorm 对每个 token 独立归一化其 embedding_dim 维度：
         均值 → 0，方差 → 1，再通过可学习的 scale/shift 恢复表达能力。
+    μ = 1/d ⋅ Σxᵢ 
+    σ² = 1/(d - 1) ⋅ Σ(xᵢ - μ)² 
+    y = (x - μ) / (√σ²+ϵ) @ γ + β  
 
-    为什么 unbiased=False（除以 n 而非 n-1）？
-        embedding_dim 通常很大（768/1024/...），n 和 n-1 差异极小，
-        且在 LLM 的每次 forward 中计算的是"当前 token 特征的内部统计"，
-        不需要作为总体方差的无偏估计，所以直接除以 n。
+    去均值：在神经网络中，绝对数值往往并不重要，相对特征差异才是表达语义特征的关键
+    几何学视角是强行把所有token的向量起点都锚定在空间的原点上
+    
+    除以标准差：统一能量标尺，防止梯度爆炸或消失。比如去均质化后的两个向量A[1, -1, 1, -1]，B[1000, -1000, 1000, -1000]
+    方向上，A和B表达的语义模式完全一样，都是1和3维度激活，第2和4维度抑制。但是B得能量是A的1000倍，量级差距大。
+    每一个网络层由多个神经元组成，假设一个MLP层前半段（LayerNorm -> Linear(768, 768*4) -> activation -> dropout -> shortcut）
+    当前层总计768*4个神经元，每一个神经元包含了多步：首先768个突触（Linear），这768个突触和求和+偏置组成一个细胞体，1个轴突（激活函数）
+    该层的输入维度(batch, seq_len, 768)，LayerNorm就是在index=2的维度上，就是对一个神经元的768个突触进行归一化。
+
+    从三个视角深度理解不同神经元之间这种能量悬殊如何直接导致梯度爆炸和消失：
+    1、反向传播链式求导使得当前层的神经元突触梯度更新值和输入x的大小成正比，如果不做归一化消除量纲，
+    TokenB大量纲会导致当前层的输出和下一层的输入值很大，由此权重W的更新步长会很大，一系列导致最终的输出值无穷大，
+    在计算Loss的时候（比如常用的负对数似然），inf会造成权重参数全部变为NaN。还有就是梯度累加，
+    
+    梯度累加的本质是在高维空间中为整个数据集寻找“最大公约数”，假设训练批次batch_size=4
+    或者还存在梯度累积步数的设置，比如梯度累计步数是3，那么对应的梯度累积到3*4=12个batch后才做一次梯度更新，
+    如果在这12个批次对应的token之间的语义向量表示（768维度）不在同一个量级，而且不做归一化处理，那么梯度累加之后大量级的
+    梯度占比会很高，意味着梯度占比小的也要按照累加后的梯度更新，假设tokenA梯度为1，tokenB梯度为99，累加了这两个token的梯度进行更新，
+    会造成整个网络完全按照 Token B 的意志去修改了参数（99/100），它拼命地去迎合 Token B，
+    以降低 Token B 产生的巨大 Loss。而 Token A 那可怜的 1 的诉求，在这 100面前就像一滴水掉进大海，对权重的最终走向没有产生任何实质性的影响。
+    
+    借助激活函数的稀疏性（即未激活神经元产生零梯度，切断更新链条），可以巧妙地避免了信息的混乱，让不同特征在平行的神经元上互不干涉地独立更新，
+    让数据共同遵守的普遍规律互相叠加强化，并让互相冲突的个性化噪音直接抵消归零；这使得网络不再局限于死记硬背某一个特定样本，而是像滤网一样洗去杂质，
+    稳步推动千万个参数向泛化能力最强的全局最优解进化。比如tokenA激活1 3 5号神经元，tokenB激活2 4 6号，tokenA对应的2 4 6号神经元的激活函数输出为0，
+    而tokenB对应的1 3 5号神经炎的激活函数输出为0，在反向传播的时候，虽然做了梯度累加，比如tokenA反向传播到激活函数这里对应的6个神经元的梯度为：
+    [1, 0, 1, 0, 1, 0]，tokenB刚好相反[0, 1, 0, 1, 0, 1]，累加之后[1, 1, 1, 1, 1, 1]。注意这里会直接导致tokenA 和 tokenB之间梯度累加的解耦，
+    也就是梯度累加后因为稀疏更新的原因其实每一个token造成自己对应的神经元的更新因为稀疏性的原因，使得累加导致的高梯度占比影响的低梯度占比程度弱化了。
+    但是这里有一个问题：虽然稀疏性性消除了梯度累加后tokenB的梯度对梯度A的影响，但是梯度B也确实影响了神经元2 4 6号，有可能在下次前向传播过程中tokenA
+    对应的2 4 6号神经元激活函数为正了（也就是被激活了），因此稀疏性会减弱，这个称为表征漂移。这是一把双刃剑，可以导致知识污染（也就是tokenA会污染tokenB的专属神经元）
+    这也是灾难性遗忘的根本原因，但是也有好的一面，比如tokenA是香蕉，tokenB是苹果，2号神经元原本只认识苹果，但是在更新后，它发现香蕉也有类似的特征，
+    它们都是水果，从此2号神经元成为了水果概念的公共神经元。这正是大模型能够涌现出强大泛化能力的底层机制（这是在训练数据集上训练造成的双刃剑，就是说训练本身就是
+    找到全局最优解，而全局最优解就是某个神经元要找到tokenA和tokenB两个词元的共同概念水果，注意这个和GELU激活函数的作用不同，GELU是为了防止死神经元，是在网络计算
+    层面，而这里是因为tokenB数据训练对2号神经元的影响，导致之前对tokenA激活函数输出为0的2号神经元激活了（正数））。如何防止这把双刃剑的负向影响？极小的学习率
+    是一个，高位空间的正交魔法是一个（一层有上万个神经元，神经元越多，随机两个神经元之间都是互相垂直的，2号神经元的修改大概率不会影响1号神经元，因为两两正交，
+    这也是为什么参数量越大的模型效果越好的原因，但是我们能做的是：***在有限的参数量里面寻找全局最优解的同时防止灾难性遗忘***）
+    
+    2、链式法则中的“复利效应”。如果 Token B 的初始输入偏大，经过第一层放大 1.1 倍，第二层又放大 1.1 倍……。
+    导致正向传播的数值直接溢出（Overflow），反向传播时瞬间爆炸。每一层算完之后，立刻进行一次“能量重置”。
+    不管刚才那一层把能量放大了还是缩小了，RMSNorm 会把输出强行除以自己的均方根，把能量重新拨回 $1.0$ 的基准线，然后再送入下一层。这样就彻底切断了“复利效应”。
+
+    3、统一的学习率无法兼顾。如果不统一能量标尺，Token A 对应的权重维度可能很平缓，而 Token B 对应的权重维度极其陡峭。
+    tokenB希望较小的学习率，tokenA希望较大的学习率，无论怎么设置学习率都无法同时兼顾。
     """
 
     def __init__(self, hidden_size: int, eps: float = 1e-5):
@@ -150,6 +133,11 @@ class LayerNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         mean = x.mean(dim=-1, keepdim=True)
+        
+        # 为什么 unbiased=False（除以 d 而非 d-1）？
+        # embedding_dim 通常很大（768/1024/...），d 和 d-1 差异极小，
+        # 且在 LLM 的每次 forward 中计算的是"当前 token 特征的内部统计"，
+        # 不需要作为总体方差的无偏估计，所以直接除以 d。
         var = x.var(dim=-1, keepdim=True, unbiased=False)
         x_norm = (x - mean) / torch.sqrt(var + self.eps)
 
@@ -242,7 +230,6 @@ class Attention(nn.Module):
 
         self.hidden_size = cfg.hidden_size
         self.num_attention_heads = cfg.num_attention_heads
-        self.num_key_value_heads = cfg.num_key_value_heads
         self.head_dim = cfg.hidden_size // cfg.num_attention_heads
         self.max_position_embeddings = cfg.max_position_embeddings
         self.d_out = cfg.hidden_size
@@ -250,11 +237,11 @@ class Attention(nn.Module):
         # w(num_attention_heads * head_dim, hidden_size), bias(num_attention_heads * head_dim,)
         self.q_proj = nn.Linear(self.hidden_size, self.num_attention_heads * self.head_dim, bias=cfg.qkv_bias)
         
-        # w(num_key_value_heads * head_dim, hidden_size), bias(num_key_value_heads * head_dim,)
-        self.k_proj   = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=cfg.qkv_bias)
+        # w(num_attention_heads * head_dim, hidden_size), bias(num_attention_heads * head_dim,)
+        self.k_proj   = nn.Linear(self.hidden_size, self.num_attention_heads * self.head_dim, bias=cfg.qkv_bias)
 
-        # w(num_key_value_heads * head_dim, hidden_size), bias(num_key_value_heads * head_dim,)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=cfg.qkv_bias)
+        # w(num_attention_heads * head_dim, hidden_size), bias(num_attention_heads * head_dim,)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_attention_heads * self.head_dim, bias=cfg.qkv_bias)
 
         # w(hidden_size, self.num_attention_heads * self.head_dim), bias(hidden_size,)
         self.o_proj = nn.Linear(self.num_attention_heads * self.head_dim, self.hidden_size)
@@ -274,24 +261,24 @@ class Attention(nn.Module):
         # input(batch, max_position_embeddings, hidden_size) @ w.T(num_attention_heads * head_dim, hidden_size) -> out(batch, max_position_embeddings, hidden_size)
         q = self.q_proj(x)
         
-        # input(batch, max_position_embeddings, hidden_size) @ w.T(num_key_value_heads * head_dim, hidden_size) -> out(batch, max_position_embeddings, hidden_size)
+        # input(batch, max_position_embeddings, hidden_size) @ w.T(num_attention_heads * head_dim, hidden_size) -> out(batch, max_position_embeddings, hidden_size)
         k = self.k_proj(x)
         
-        # input(batch, max_position_embeddings, hidden_size) @ w.T(num_key_value_heads * head_dim, hidden_size) -> out(batch, max_position_embeddings, hidden_size)
+        # input(batch, max_position_embeddings, hidden_size) @ w.T(num_attention_heads * head_dim, hidden_size) -> out(batch, max_position_embeddings, hidden_size)
         v = self.v_proj(x)
 
         # input(batch, max_position_embeddings, hidden_size) -> view(batch, max_position_embeddings, num_attention_heads, head_dim) -> out(batch, num_attention_heads, max_position_embeddings, head_dim)
         q = q.view(batch, max_position_embeddings, self.num_attention_heads, self.head_dim).transpose(1, 2)
 
-        # input(batch, max_position_embeddings, hidden_size) -> view(batch, max_position_embeddings, num_key_value_heads, head_dim) -> out(batch, num_key_value_heads, max_position_embeddings, head_dim)
-        k = k.view(batch, max_position_embeddings, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # input(batch, max_position_embeddings, hidden_size) -> view(batch, max_position_embeddings, num_attention_heads, head_dim) -> out(batch, num_attention_heads, max_position_embeddings, head_dim)
+        k = k.view(batch, max_position_embeddings, self.num_attention_heads, self.head_dim).transpose(1, 2)
 
-        # input(batch, max_position_embeddings, hidden_size) -> view(batch, max_position_embeddings, num_key_value_heads, head_dim) -> out(batch, num_key_value_heads, max_position_embeddings, head_dim)
-        v = v.view(batch, max_position_embeddings, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # input(batch, max_position_embeddings, hidden_size) -> view(batch, max_position_embeddings, num_attention_heads, head_dim) -> out(batch, num_attention_heads, max_position_embeddings, head_dim)
+        v = v.view(batch, max_position_embeddings, self.num_attention_heads, self.head_dim).transpose(1, 2)
 
         # q(batch, num_attention_heads, max_position_embeddings, head_dim)
-        # k.transpose(2, 3)(batch, num_key_value_heads, head_dim, max_position_embeddings)
-        # (batch, num_attention_heads, max_position_embeddings, head_dim) @ (batch, num_key_value_heads, head_dim, max_position_embeddings) -> out(batch, num_attention_heads, max_position_embeddings, max_position_embeddings)
+        # k.transpose(2, 3)(batch, num_attention_heads, head_dim, max_position_embeddings)
+        # (batch, num_attention_heads, max_position_embeddings, head_dim) @ (batch, num_attention_heads, head_dim, max_position_embeddings) -> out(batch, num_attention_heads, max_position_embeddings, max_position_embeddings)
         attn_scores = q @ k.transpose(2, 3) / math.sqrt(self.head_dim)
 
         # 应用 causal mask，遮掉未来 token
@@ -463,7 +450,7 @@ class GPTForCausalLM(nn.Module):
         self.model = GPTModel(cfg)
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False) # w(vocab_size, embedding_dim)
         
-        if cfg.tie_word_embeddings:
+        if self.cfg.tie_word_embeddings:
           self.lm_head.weight = self.model.embed_tokens.weight
     
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
@@ -475,128 +462,112 @@ class GPTForCausalLM(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        idx: torch.Tensor,
-        max_new_tokens: int,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        max_new_tokens: int = 50,
         temperature: float = 1.0,
         top_k: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+        do_sample: bool = True,
     ) -> torch.Tensor:
-        """自回归文本生成。
+        """自回归文本生成(兼容Transformers接口).
 
         Args:
-            idx:            (batch, seq_len) 初始 token 序列
+            input_ids:      (batch, seq_len) 初始 token 序列
+            attention_mask: (batch, seq_len) 注意力掩码(当前版本未使用, 保留接口兼容性)
             max_new_tokens: 最多生成多少个新 token
-            temperature:    温度，<1 更保守，>1 更随机
-            top_k:          只从概率最高的 top_k 个 token 中采样（None 则不限制）
+            temperature:    温度, <1 更保守, >1 更随机
+            top_k:          只从概率最高的 top_k 个 token 中采样(None 则不限制)
+            pad_token_id:   padding token id(从config读取)
+            eos_token_id:   结束token id(遇到时提前停止, 从config读取)
+            do_sample:      是否采样(False时使用贪婪解码)
         """
+        # 使用config中的默认值
+        pad_token_id = pad_token_id or self.cfg.pad_token_id
+        eos_token_id = eos_token_id or self.cfg.eos_token_id
+
+        idx = input_ids
         for _ in range(max_new_tokens):
             # 裁剪到 context_length，避免位置编码越界
-            # input(1, 3)
             idx_cond = idx[:, -self.cfg.max_position_embeddings:]
-            
-            # input(1, 3) -> out(1, 3, vocab_size)
-            logits = self(idx_cond)
-            
-            # input(1, 3, vocab_size) -> out(1, vocab_size)
-            """
-            “农业 是 重要 的”，token id 为 [10, 20, 30, 40]
-            第1步: 输入 [10]→ 输出 (1,1,vocab_size) → 取最后位置 → argmax=20(是)
-            第2步: 输入 [10,20]       → 输出 (1,2,vocab_size) → 取最后位置 → argmax=30(重要)
-            第3步: 输入 [10,20,30]    → 输出 (1,3,vocab_size) → 取最后位置 → argmax=40(的)
-            第4步: 输入 [10,20,30,40] → 输出 (1,4,vocab_size) → 取最后位置 → argmax=50(<end>)
 
-            第4步处理 [10,20,30,40] 时：
-            - 10 的 K、V 已经算过3次了
-            - 20 的 K、V 已经算过2次了
-            - 30 的 K、V 已经算过1次了
-            K 和 V 都是由输入 x 线性变换得到的。对于已经出现过的 token，它的位置不变、内容不变，所以它的 K 和 V 永远不会变。
-            因此kv cache可以显著减少推理过程中的显存占用。
-            也就是在预测完第index=2的token之后（根据第index=1的token embedding去预测index=2的），需要预测第index=3的token时候，
-            需要计算第index=2的query, key和value，然后使用新计算的index=2的query和index=0, 1的key和index=2的key拼接之后的key
-            去计算注意力分数，然后和拼接后的value去计算得到注意力层最终的输出。这是推理时候的显存优化，在训练的时候是并行计算的，所以
-            不涉及这个问题。
-            """
-            
+            # 前向传播
+            logits = self(idx_cond)
+
+            # 只取最后一个位置的 logits
             logits = logits[:, -1, :]
 
-            if top_k is not None:
-                # 将 top_k 之外的 logits 设为 -inf
+            # 应用 top-k 过滤
+            if top_k is not None and do_sample:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float("-inf")
 
-            logits = logits / temperature
-            
-            # (1, vocab_size)
-            probs = F.softmax(logits, dim=-1)
+            # 应用温度
+            if do_sample:
+                logits = logits / temperature
+                probs = F.softmax(logits, dim=-1)
+                idx_next = torch.multinomial(probs, num_samples=1)
+            else:
+                # 贪婪解码
+                idx_next = torch.argmax(logits, dim=-1, keepdim=True)
 
-            # (1, 1)
-            # multinomial -> argmax when temperature=0.0
-            # multinomial -> random sampling when temperature>0.0
-            idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
-            
-            # (1, 3) cat (1, 1) -> (1, 4)
+            # 检测eos_token提前停止
+            if eos_token_id is not None and (idx_next == eos_token_id).any():
+                idx = torch.cat([idx, idx_next], dim=-1)
+                break
+
+            # 拼接新生成的token
             idx = torch.cat([idx, idx_next], dim=-1)
 
-        # (1, 13)
         return idx
     
     @classmethod
     def from_pretrained(
         cls,
         model_name_or_path: str = "124M",
-        source: str = "hf",
+        source: str = "local",
         model_dir: str = "/home/weiyutao/ai/continual_learning/gpt2",
         map_location: Optional[Union[str, torch.device]] = "cpu"
     ) -> "GPTModel":
-        """加载 OpenAI 官方 GPT-2 预训练权重。
+        """加载预训练权重。
 
         Args:
             model_name_or_path: 模型名称或路径
-            source: "hf" | "openai" | "pt"
+            source: "local" | "hf" | "openai"
+                - "local": 本地训练的模型(自动检测格式)
+                - "hf": HuggingFace官方下载的预训练权重
+                - "openai": OpenAI官方TensorFlow格式
             map_location: 设备映射位置，默认 "cpu"。可以是 "cuda", "cuda:0", torch.device 对象等
         """
-        if source == "hf":
+        if source == "local":
+            return cls._from_local(model_name_or_path, map_location)
+        elif source == "hf":
             return cls._from_hf(model_name_or_path, map_location)
         elif source == "openai":
             return cls._from_openai(model_name_or_path, model_dir, map_location)
-        elif source == "pt":
-            return cls._from_pt(model_name_or_path, map_location)
+        else:
+            raise ValueError(f"Unknown source: {source}. Must be 'local', 'hf', or 'openai'")
         
     @classmethod
     def _from_hf(cls, model_name_or_path: str, map_location: Optional[Union[str, torch.device]] = "cpu"):
-        
         """
-        # gpt2 config for huggingface model config.
-        {
-            'activation_function': 'gelu_new', 
-            'architectures': ['GPT2LMHeadModel'], 
-            'attn_pdrop': 0.1, 
-            'bos_token_id': 50256, 
-            'embd_pdrop': 0.1, 
-            'eos_token_id': 50256, 
-            'initializer_range': 0.02, 
-            'layer_norm_epsilon': 1e-05, 
-            'model_type': 'gpt2', 
-            'n_ctx': 1024, 
-            'n_embd': 768, 
-            'n_head': 12, 
-            'n_layer': 12, 
-            'n_positions': 1024, 
-            'resid_pdrop': 0.1, 
-            'summary_activation': None, 
-            'summary_first_dropout': 0.1, 
-            'summary_proj_to_labels': True, 
-            'summary_type': 'cls_index', 
-            'summary_use_proj': True, 
-            'task_specific_params': {'text-generation': {'do_sample': True, 'max_length': 50}}, 
-            'vocab_size': 50257
-        }
-        
-        从Hugginface safetensor格式加载
-              
+        从HuggingFace格式加载（支持下载的和Transformers训练保存的两种格式）
+
+        支持的格式：
+        HuggingFace Hub下载的模型（键名无前缀，如 wte.weight）
+        自动检测格式并正确转换
+
         Args:
-            model_name_or_path: 
-                - 规格名称: "124M", "355M", "774M", "1558M"
-                - 或模型目录路径: "/path/to/gpt2/124M"
+            model_name_or_path: 模型目录路径，如 "/path/to/gpt2/124M"
+
+        HuggingFace config.json 示例:
+        {
+            'vocab_size': 50257, 'n_positions': 1024, 'n_embd': 768,
+            'n_layer': 12, 'n_head': 12, 'activation_function': 'gelu_new',
+            'resid_pdrop': 0.1, 'embd_pdrop': 0.1, 'attn_pdrop': 0.1,
+            'layer_norm_epsilon': 1e-05, 'bos_token_id': 50256, 'eos_token_id': 50256
+        }
         """
         config_path = os.path.join(model_name_or_path, "config.json")
         safetensors_path = os.path.join(model_name_or_path, "model.safetensors")
@@ -605,33 +576,16 @@ class GPTForCausalLM(nn.Module):
         if not os.path.exists(safetensors_path):
             raise FileNotFoundError(f"Safetensors file not found at {safetensors_path}")
 
-        # 2. 读取 Hugging Face 模型的 config
+        # 读取 Hugging Face 模型的 config
         with open(config_path, "r", encoding="utf-8") as f:
             hf_config_dict = json.load(f)
-            
-        # logger.info(hf_config_dict)
 
         # config 映射
-        config = GPTConfig(
-            vocab_size=hf_config_dict["vocab_size"],
-            hidden_size=hf_config_dict["n_embd"],
-            intermediate_size=hf_config_dict["n_embd"] * 4,
-            max_position_embeddings=hf_config_dict["n_positions"],
-            num_attention_heads=hf_config_dict["n_head"],
-            num_key_value_heads=hf_config_dict["n_head"],
-            num_hidden_layers=hf_config_dict["n_layer"],
-            layer_norm_epsilon=hf_config_dict["layer_norm_epsilon"],
-            embd_pdrop=hf_config_dict["embd_pdrop"],
-            resid_pdrop=hf_config_dict["resid_pdrop"],
-            attn_pdrop=hf_config_dict["attn_pdrop"],
-            activation_function=hf_config_dict["activation_function"],
-            qkv_bias=True,
-        )
-        
+        config = GPTConfig.from_dict(hf_config_dict)
+
         # 加载huggingface权重
         device_str = str(map_location) if map_location else "cpu"
         hf_state_dict = load_file(safetensors_path, device=device_str)
-        # logger.info(print_state_dict_keys(hf_state_dict))
 
         # 转换为自定义格式
         state_dict = convert_safetensors_to_custom(hf_state_dict, config.num_hidden_layers, config.tie_word_embeddings)
@@ -640,7 +594,7 @@ class GPTForCausalLM(nn.Module):
         model = cls(config)
         model.load_state_dict(state_dict)
         model.to(map_location)
-        
+
         return model
 
     @classmethod
@@ -694,26 +648,8 @@ class GPTForCausalLM(nn.Module):
                 hparams = json.load(f)
 
             # 2.2 将hparams转换为GPTConfig
-            """
-            # hparams config json
-            {
-                "n_vocab": 50257,
-                "n_ctx": 1024,
-                "n_embd": 768,
-                "n_head": 12,
-                "n_layer": 12
-            }
-            """
-            config = GPTConfig(
-                vocab_size=hparams["n_vocab"],
-                hidden_size=hparams["n_embd"],
-                intermediate_size=hparams["n_embd"] * 4,
-                num_hidden_layers=hparams["n_layer"],
-                num_attention_heads=hparams["n_head"],
-                num_key_value_heads=hparams["n_head"],
-                max_position_embeddings=hparams["n_ctx"],
-                qkv_bias=True,
-            )
+            config = GPTConfig.from_dict(hparams)
+            config.qkv_bias = True
             # 2.3 加载checkpoint权重
             from model.gpt2.gpt_download import load_gpt2_params_from_tf_ckpt
             params = load_gpt2_params_from_tf_ckpt(model_path, hparams)
@@ -732,14 +668,16 @@ class GPTForCausalLM(nn.Module):
         return model
 
     @classmethod
-    def _from_pt(cls, model_name_or_path: str, map_location: Optional[Union[str, torch.device]] = "cpu"):
-        """从自定义格式加载
+    def _from_local(cls, model_name_or_path: str, map_location: Optional[Union[str, torch.device]] = "cpu"):
+        """从本地训练保存的模型加载
 
         Args:
             model_name_or_path: 模型路径
             map_location: 设备映射位置，默认 "cpu"
 
         支持格式：
+        - 自定义模型训练保存的（有model.前缀）
+        - Transformers模型训练保存的（有transformer.前缀）→ 自动转换
         - 优先加载 model.safetensors
         - 兼容 pytorch_model.bin / .pt
         """
@@ -774,7 +712,9 @@ class GPTForCausalLM(nn.Module):
 
         with open(config_file) as f:
             config_dict = json.load(f)
-        config = GPTConfig(**config_dict)
+
+        # 重构该config转换逻辑，因为多个函数内部需要复用该逻辑
+        config = GPTConfig.from_dict(config_dict)
 
         # 加载权重
         if use_safetensors:
@@ -782,6 +722,19 @@ class GPTForCausalLM(nn.Module):
         else:
             state_dict = torch.load(weight_file, map_location=map_location, weights_only=False)
 
+        # 检测格式并转换（自定义以model为前缀，transformers库训练的以transformers为前缀）
+        has_model_prefix = any(k.startswith("model.") for k in state_dict.keys())
+        has_transformer_prefix = any(k.startswith("transformer.") for k in state_dict.keys())
+
+        if has_transformer_prefix:
+            # Transformers训练保存的格式，需要转换为自定义格式
+            logger.info("检测到Transformers格式，正在转换为自定义格式...")
+            state_dict = convert_safetensors_to_custom(state_dict, config.num_hidden_layers, config.tie_word_embeddings)
+        elif not has_model_prefix:
+            raise ValueError(
+                f"未知的权重格式。期望的键前缀：'model.' 或 'transformer.'，"
+                f"但实际键示例：{list(state_dict.keys())[:3]}"
+            )
         model = cls(config)
         model.load_state_dict(state_dict)
         model.to(map_location)
@@ -797,7 +750,7 @@ if __name__ == "__main__":
     """
     from config import SOURCE_DIR, OUT_DIR
     from tokenizers import Tokenizer
-    
+    load_pretrained_mode = LoadMode.CONTINUAL
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = Tokenizer.from_pretrained("gpt2")
     cfg = GPTConfig.gpt2_medium()
@@ -809,15 +762,14 @@ if __name__ == "__main__":
     """
     # 加载权重测试
     """
-    load_pretrained_mode = 2 # 1: scratch, 2: load_pretrained, 3: load_continual_learning
-    if load_pretrained_mode == 2:
+    if load_pretrained_mode == LoadMode.PRETRAINED:
         # model = GPTForCausalLM.from_pretrained("124M", source="openai")
         # 注意map_location和.to(device)的区别，前者一般是初始化模型权重的时候加载，后者一般是在运行的时候加载
-        # model = GPTForCausalLM.from_pretrained(model_name_or_path="355M", source="openai", model_dir=f"{SOURCE_DIR}/trf/gpt2", map_location=device)
-        model = GPTForCausalLM.from_pretrained(f"{SOURCE_DIR}/trf/gpt2/355M", source="openai", map_location=device)
-        # model = GPTForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/gpt2/355M", source="hf", map_location=device)
-    elif load_pretrained_mode == 3:
-        model = GPTForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260722", source="pt", map_location=device)
+        # model = GPTForCausalLM.from_pretrained(model_name_or_path="124M", source="openai", model_dir=f"{SOURCE_DIR}/trf/gpt2", map_location=device)
+        # model = GPTForCausalLM.from_pretrained(f"{SOURCE_DIR}/trf/gpt2/124M", source="openai", map_location=device)
+        model = GPTForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/gpt2/124M", source="hf", map_location=device)
+    elif load_pretrained_mode == LoadMode.CONTINUAL:
+        model = GPTForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260722", source="local", map_location=device)
     
     
     """

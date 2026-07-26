@@ -387,45 +387,34 @@ def convert_openai_to_custom(openai_params: dict, n_layers: int) -> dict:
 
 def convert_safetensors_to_custom(hf_state_dict: dict, n_layers: int, tie_word_embeddings: bool) -> dict:
     """
-    ================================================================================
-    State Dict Keys
-    safetensors.load_file加载输出的结构
-    logger.info(print_state_dict_keys(hf_state_dict))
-    注意实际转换过程中这个是标准的加载方式，比transoformers封装的少了最外层的transformer这个键，同时也少了lm_head，
-    因为tie_word_embeddings=True
-    ================================================================================
+    将HuggingFace格式的state_dict转换为自定义GPTModel格式
 
-    根级别:
-    ln_f.bias
-    ln_f.weight
-    wpe.weight
-    wte.weight
+    支持两种输入格式：
+    1. HuggingFace下载的safetensors（无前缀）: wte.weight, h.0.ln_1.weight
+    2. Transformers训练保存的（有transformer.前缀）: transformer.wte.weight, transformer.h.0.ln_1.weight
 
-    Transformer层 (h.0 示例):
-    h.0.attn: ['bias']
-    h.0.attn.c_attn: ['bias', 'weight']
-    h.0.attn.c_proj: ['bias', 'weight']
-    h.0.ln_1: ['bias', 'weight']
-    h.0.ln_2: ['bias', 'weight']
-    h.0.mlp.c_fc: ['bias', 'weight']
-    h.0.mlp.c_proj: ['bias', 'weight']
+    自动检测格式并处理
     """
-    
+
+    # 检测是否有transformer.前缀
+    has_transformer_prefix = any(k.startswith("transformer.") for k in hf_state_dict.keys())
+    prefix = "transformer." if has_transformer_prefix else ""
+
     sd = {}
     # 嵌入层
-    wte_weight = hf_state_dict["wte.weight"]
+    wte_weight = hf_state_dict[f"{prefix}wte.weight"]
     sd["model.embed_tokens.weight"] = wte_weight
-    sd["model.embed_pos_tokens.weight"] = hf_state_dict["wpe.weight"]
+    sd["model.embed_pos_tokens.weight"] = hf_state_dict[f"{prefix}wpe.weight"]
 
     # 最终归一化层
-    sd["model.norm.scale"] = hf_state_dict["ln_f.weight"]
-    sd["model.norm.shift"] = hf_state_dict["ln_f.bias"]
+    sd["model.norm.scale"] = hf_state_dict[f"{prefix}ln_f.weight"]
+    sd["model.norm.shift"] = hf_state_dict[f"{prefix}ln_f.bias"]
 
-    # 输出头
+    # 输出头（lm_head总是在顶层，没有transformer.前缀）
     sd["lm_head.weight"] = hf_state_dict["lm_head.weight"] if not tie_word_embeddings else wte_weight
-    
+
     for i in range(n_layers):
-        hf_prefix = f"h.{i}"
+        hf_prefix = f"{prefix}h.{i}"
         custom_prefix = f"model.layers.{i}"
 
         # 注意力层LayerNorm
@@ -439,10 +428,10 @@ def convert_safetensors_to_custom(hf_state_dict: dict, n_layers: int, tie_word_e
         sd[f"{custom_prefix}.self_attn.q_proj.weight"] = q_w
         sd[f"{custom_prefix}.self_attn.k_proj.weight"] = k_w
         sd[f"{custom_prefix}.self_attn.v_proj.weight"] = v_w
-        
+
         # Q/K/V bias
         c_attn_bias = hf_state_dict[f"{hf_prefix}.attn.c_attn.bias"] # (2304,)
-        q_b, k_b, v_b = torch.chunk(c_attn_bias, 3, dim=0) # (768,) * 3 
+        q_b, k_b, v_b = torch.chunk(c_attn_bias, 3, dim=0) # (768,) * 3
         sd[f"{custom_prefix}.self_attn.q_proj.bias"] = q_b
         sd[f"{custom_prefix}.self_attn.k_proj.bias"] = k_b
         sd[f"{custom_prefix}.self_attn.v_proj.bias"] = v_b
@@ -451,7 +440,7 @@ def convert_safetensors_to_custom(hf_state_dict: dict, n_layers: int, tie_word_e
         c_proj_weight = hf_state_dict[f"{hf_prefix}.attn.c_proj.weight"] # (768, 768)
         sd[f"{custom_prefix}.self_attn.o_proj.weight"] = c_proj_weight.T # (768, 768)
         sd[f"{custom_prefix}.self_attn.o_proj.bias"] = hf_state_dict[f"{hf_prefix}.attn.c_proj.bias"]
-        
+
         # MLP LayerNorm
         sd[f"{custom_prefix}.post_attention_layernorm.scale"] = hf_state_dict[f"{hf_prefix}.ln_2.weight"]
         sd[f"{custom_prefix}.post_attention_layernorm.shift"] = hf_state_dict[f"{hf_prefix}.ln_2.bias"]
@@ -464,7 +453,7 @@ def convert_safetensors_to_custom(hf_state_dict: dict, n_layers: int, tie_word_e
         c_proj_weight = hf_state_dict[f"{hf_prefix}.mlp.c_proj.weight"] # (3072, 768)
         sd[f"{custom_prefix}.mlp.down_proj.weight"] = c_proj_weight.T
         sd[f"{custom_prefix}.mlp.down_proj.bias"] = hf_state_dict[f"{hf_prefix}.mlp.c_proj.bias"]
-    
+
     return sd
 
 

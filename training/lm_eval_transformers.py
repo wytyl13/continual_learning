@@ -11,6 +11,7 @@ import torch
 from transformers import GPT2LMHeadModel, GPT2Config
 
 from training import GPT2LM
+from model.gpt2.model import GPTConfig
 from model.gpt2.weight_convert import convert_custom_to_hf
 from config import SOURCE_DIR, OUT_DIR
 
@@ -20,10 +21,11 @@ if __name__ == "__main__":
     # 随机初始化的模型产生近乎随机的 token 概率，困惑度极高（约等于词表大小 ~50257）如果随机初始化，
     # 在100次 bootstrap 迭代的方差计算中可能导致 float64 溢出
     bootstrap_iters = 0 
-    
+    config = GPTConfig.gpt2_small()
     
     # 初始化模型
-    cfg = GPT2Config(vocab_size=50257, n_positions=1024, n_embd=768, n_layer=12, n_head=12)
+    config.to_transformers_dict()
+    cfg = GPT2Config(**config.to_transformers_dict())
     model = GPT2LMHeadModel(cfg)
     
     # 加载权重
