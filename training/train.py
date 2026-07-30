@@ -37,7 +37,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 使用枚举进行模式选择
-    load_pretrained_mode = LoadMode.CONTINUAL 
+    load_pretrained_mode = LoadMode.SCRATCH 
     model_type = ModelType.TRANSFORMERS
     
     gpt_cfg = None
@@ -46,8 +46,10 @@ if __name__ == "__main__":
     gpt_cfg: GPTConfig = GPTConfig.gpt2_small() 
     if model_type == ModelType.TRANSFORMERS:
         gpt_cfg = GPT2Config(**gpt_cfg.to_transformers_dict())
+        
     model = GPTForCausalLM(gpt_cfg) if model_type == ModelType.CUSTOM else GPT2LMHeadModel(gpt_cfg)
     model.to(device)
+    
     # 加载模型权重
     if load_pretrained_mode == LoadMode.PRETRAINED:
         # model = GPTForCausalLM.from_pretrained(

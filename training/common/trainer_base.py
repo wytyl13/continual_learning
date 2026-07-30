@@ -287,22 +287,26 @@ def train_model(model, train_loader, val_loader,
 
     for epoch in range(num_epochs):
         model.train()
+        is_deepspeed = hasattr(model, "backward") and hasattr(model, "step")
 
         for input_batch, target_batch in train_loader:
-
             # 梯度清零
-            optimizer.zero_grad()
+            if not is_deepspeed:
+                optimizer.zero_grad()
 
             # 前向传播
             loss = calc_loss_batch(
                 input_batch, target_batch, model, device
             )
 
-            # 反向传播
-            loss.backward()
-
-            # 优化器执行梯度更新权重
-            optimizer.step()
+            if is_deepspeed:
+                # DeepSpeed 模式：引擎自动处理梯度累加、显存卸载和清零
+                model.backward(loss)
+                model.step()
+            else:
+                # 原生 PyTorch 模式
+                loss.backward()
+                optimizer.step()
 
             # 计算累积token数
             tokens_seen += input_batch.numel()

@@ -213,11 +213,7 @@ class Attention(nn.Module):
     的注意力加权平均，比如index=3的token，其加权注意力是index=0, 1, 2, 3所有token按照因果注意力
     加权平均求和之后的结果，而RNN逐步传递信息越传越衰减的，这里是按需取用任意位置的内容，距离再远也不会产生衰减。
     
-    
     GPT 使用标准 MHA（每个 head 都有完整的 Q/K/V）。
-    LLaMA 2 引入 GQA（Grouped Query Attention），多个 Q head 共享同一组 K/V，
-    大幅减少 KV Cache 显存占用。
-
     Causal Mask：
         上三角矩阵遮掉未来 token 的注意力分数（填 -inf，softmax 后趋近 0），
         保证自回归生成时第 t 个 token 只能看到 t 及之前的 token。
@@ -317,9 +313,6 @@ class MLP(nn.Module):
     GPT 的 FFN 结构：Linear(d → 4d) → GELU → Linear(4d → d)
     升维到 4d 的目的：给模型更大的"工作空间"来学习复杂的特征变换，
     GELU 负责非线性过滤，然后降维再把有效信息压缩回原始维度。
-
-    LLaMA 改用 SwiGLU：Linear(d → 8/3*d) * sigmoid gate → Linear(8/3*d → d)
-    三个矩阵而非两个，但参数量通过调整维度保持近似等效。
     """
 
     def __init__(self, cfg: GPTConfig):
@@ -337,6 +330,7 @@ class MLP(nn.Module):
 
         # self.up_proj: input(batch, max_position_embeddings, hidden_size) @ w.T(hidden_size, intermediate_size) -> out(batch, max_position_embeddings, intermediate_size)
         # self.down_proj: input(batch, max_position_embeddings, intermediate_size) @ w.T(intermediate_size, hidden_size) -> out(batch, max_position_embeddings, hidden_size)
+        # Apply the active function for up_pro result to improve its 非线性，然后对非线性结果应用下采样。
         return self.down_proj(self.act_fn(self.up_proj(x)))
 
 
