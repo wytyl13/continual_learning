@@ -99,9 +99,21 @@ class GPT2LM(LM):
             # 给定上下文和续写
             # "The cat sat on the" and "mat"
             context, continuation = req.args
-            ctx_ids = self.tok_encode(context) # [464, 3797, 3332, 319, 262]
-            cont_ids = self.tok_encode(continuation) # [2603]
-            cont_len = len(cont_ids) # 1
+            # ctx_ids = self.tok_encode(context) # [464, 3797, 3332, 319, 262]
+            # cont_ids = self.tok_encode(continuation) # [2603]
+            # cont_len = len(cont_ids) # 1
+
+            # 1. 整体拼接后分词，保证内部不会被错误插入特殊 token
+            full_text = context + continuation
+            full_ids = self.tok_encode(full_text)
+            
+            # 2. 单独对 context 分词，用来确定分割点
+            ctx_ids = self.tok_encode(context)
+            
+            # 3. 通过切片获得干净的 continuation ids
+            cont_ids = full_ids[len(ctx_ids):]
+            cont_len = len(cont_ids)
+
             
             # 拼接，如果总长度超过max_length就左截断，保证续写永远在末尾
             # [464, 3797, 3332, 319, 262, 2603]

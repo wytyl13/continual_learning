@@ -41,7 +41,38 @@ LLamaForCausalLM(
 import torch
 from typing import Dict, Any
 
-def convert_safetensors_to_custom(hf_state_dict: dict, n_layers: int, tie_word_embeddings: bool) -> dict:
+
+def permute_for_llama2c(w: torch.Tensor, n_heads: int) -> torch.Tensor:
+    """
+    view(n_heads, 2, hd//2, dim2).transpose(1,2).reshape(...)
+    """
+    dim1, dim2 = w.shape
+    return (
+        w.view(n_heads, 2, dim1 // n_heads // 2, dim2)
+         .transpose(1, 2)
+         .reshape(dim1, dim2)
+    )
+
+
+def permute_llama2c_to_hf(w: torch.Tensor, n_heads: int) -> torch.Tensor:
+    """
+    view(n_heads, hd//2, 2, dim2).transpose(1,2).reshape(...)
+    """
+    dim1, dim2 = w.shape
+    return (
+        w.view(n_heads, dim1 // n_heads // 2, 2, dim2)
+         .transpose(1, 2)
+         .reshape(dim1, dim2)
+    )
+
+
+def convert_safetensors_to_custom(
+    hf_state_dict: dict,
+    n_layers: int,
+    tie_word_embeddings: bool,
+    n_heads: int = 32,
+    n_kv_heads: int = 32,
+) -> dict:
     """
     将HuggingFace格式的state_dict转换为自定义LLamaModel格式
 
@@ -93,30 +124,41 @@ def convert_safetensors_to_custom(hf_state_dict: dict, n_layers: int, tie_word_e
         # 1. 舍弃官方的位置编码缓存
         if "rotary_emb.inv_freq" in k:
             continue
+        # 2. Q/K 权重 permute：HF split-half → llama2.c 相邻成对
+        #    自定义模型的 apply_rotary_emb 使用 llama2.c 风格，需要对应格式的权重
+        if k.endswith("q_proj.weight"):
+            v = permute_for_llama2c(v, n_heads)
+        elif k.endswith("k_proj.weight"):
+            v = permute_for_llama2c(v, n_kv_heads)
         sd[k] = v
-            
+
     # 词嵌入绑定逻辑
     if tie_word_embeddings and "model.embed_tokens.weight" in sd:
         sd["lm_head.weight"] = sd["model.embed_tokens.weight"]
-            
+
     return sd
 
 
-def convert_custom_to_hf(custom_state_dict: Dict[str, Any]) -> Dict[str, Any]:
+def convert_custom_to_hf(
+    custom_state_dict: Dict[str, Any],
+    n_heads: int = 32,
+    n_kv_heads: int = 32,
+) -> Dict[str, Any]:
     """
-    将 自定义格式的 state_dict 转换回 HuggingFace 官方格式
-    用于将我们自己训练/微调后的模型，导出给开源社区或推理引擎(如vLLM)使用。
+    将自定义格式的 state_dict 转换回 HuggingFace 官方格式。
+    用于将训练/微调后的模型导出给开源社区或推理引擎(如 vLLM)使用。
+    permute_for_llama2c 自身是逆操作，再做一次即可还原 HF split-half 格式。
     """
     hf_sd = {}
-    
     for k, v in custom_state_dict.items():
-        # HF 的 LlamaForCausalLM 会在模型内部重新注册或计算这些值
         if "freqs_cos" in k or "freqs_sin" in k or "mask" in k:
             continue
-            
-        # 2. 其余所有参数直接原样拷贝
+        # Q/K 逆 permute：llama2.c 相邻成对 → HF split-half
+        if k.endswith("q_proj.weight"):
+            v = permute_llama2c_to_hf(v, n_heads)
+        elif k.endswith("k_proj.weight"):
+            v = permute_llama2c_to_hf(v, n_kv_heads)
         hf_sd[k] = v
-        
     return hf_sd
 
 if __name__ == "__main__":

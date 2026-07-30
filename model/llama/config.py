@@ -127,6 +127,19 @@ class LLamaConfig:
             rope_theta=500000.0
         )
         
+    @classmethod
+    def llama3_70b(cls) -> "LLamaConfig":
+        """LLaMA-3 70B (GQA)"""
+        return cls(
+            vocab_size=128256,
+            hidden_size=8192,
+            num_attention_heads=64,
+            num_key_value_heads=8,
+            num_hidden_layers=80,
+            max_position_embeddings=8192,
+            rope_theta=500000.0
+        )
+        
     # ═══════════════════════════════════════════════════════════════
     # Config格式转换（核心方法）
     # ═══════════════════════════════════════════════════════════════

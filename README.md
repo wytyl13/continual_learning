@@ -35,6 +35,23 @@ HF_ENDPOINT=https://hf-mirror.com huggingface-cli download TinyLlama/TinyLlama-1
   --local-dir /mnt/wsl/fast_disk/continual_learning/source/hf/llama/tiny_llama \
   --include "*.safetensors" "*.json" "*.txt" "*.model"
 
+HF_ENDPOINT=https://hf-mirror.com huggingface-cli download TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T \
+  --local-dir /root/autodl-tmp/continual_learning_data/source/hf/llama/tiny_llama \
+  --include "*.safetensors" "*.json" "*.txt" "*.model"
+
+HF_ENDPOINT=https://hf-mirror.com huggingface-cli download meta-llama/Llama-2-7b-hf \
+  --local-dir /root/autodl-tmp/continual_learning_data/source/hf/llama/llama-2-7b \
+  --include "*.safetensors" "*.json" "*.txt" "*.model" --exclude "*.bin"
+
+HF_ENDPOINT=https://hf-mirror.com huggingface-cli download NousResearch/Llama-2-7b-hf \
+  --local-dir /root/autodl-tmp/continual_learning_data/source/hf/llama/llama-2-7b \
+  --include "*.safetensors" "*.json" "*.txt" "*.model" --exclude "*.bin"
+
+
+deepspeed --num_gpus=1 --module training.train_llama
+python -m training.train_llama
+
+
 ~/.claude/projects
 
 
