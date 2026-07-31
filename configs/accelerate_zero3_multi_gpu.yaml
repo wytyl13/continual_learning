@@ -1,0 +1,18 @@
+# 多卡配置：ZeRO-3，无 CPU 卸载
+# 适用：N 张 24GiB 显卡，参数分摊到各卡，无需 CPU 卸载（N=4 时每卡 ~25GiB）
+# 用法: accelerate launch --config_file configs/accelerate_zero3_multi_gpu.yaml -m training.train_llama
+# 注意：修改 num_processes 为实际 GPU 数量
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+mixed_precision: bf16
+num_machines: 1
+num_processes: 4              # 修改为实际 GPU 数量
+use_cpu: false
+deepspeed_config:
+  gradient_accumulation_steps: 4
+  gradient_clipping: 1.0
+  offload_optimizer_device: none   # 多卡时参数已分摊，无需卸载
+  offload_param_device: none
+  zero3_init_flag: true
+  zero3_save_16bit_model: true
+  zero_stage: 3

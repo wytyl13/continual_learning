@@ -1,0 +1,16 @@
+# 用法: PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128" accelerate launch --config_file configs/accelerate_zero3_two_gpu.yaml -m training.train_llama
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+mixed_precision: bf16
+num_machines: 1
+num_processes: 3              # 修改为实际 GPU 数量
+use_cpu: false
+deepspeed_config:
+  gradient_accumulation_steps: 3
+  gradient_clipping: 1.0
+  offload_optimizer_device: none
+  offload_param_device: none
+  zero3_init_flag: true
+  zero3_save_16bit_model: true
+  zero_stage: 3
+  sub_group_size: 100000000

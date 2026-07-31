@@ -13,11 +13,18 @@ import torch.nn as nn
 from typing import Tuple, Optional, Union
 import math
 import inspect
+import json
+import os
+from accelerate import init_empty_weights
 
 from model.llama.config import LLamaConfig
 from model.gpt2.model import GELU
+from model.llama.weight_convert import convert_safetensors_to_custom
+
+from utils.model_loader import resolve_checkpoint_files, build_auto_device_map, fast_load_weights
 from utils.logger import get_logger
 from utils.enums import LoadMode, ModelType
+
 
 logger = get_logger(__name__)
 
@@ -399,8 +406,10 @@ class LLamaModel(nn.Module):
         freqs_cos = self.freqs_cos[:max_position_embeddings]
         freqs_sin = self.freqs_sin[:max_position_embeddings]
         for layer in self.layers:
-            x = layer(x, freqs_cos, freqs_sin)
-
+            # x = layer(x, freqs_cos, freqs_sin)
+            layer_device = next(layer.parameters()).device
+            x = layer(x.to(layer_device), freqs_cos.to(layer_device), freqs_sin.to(layer_device))
+        x = x.to(next(self.norm.parameters()).device)
         x = self.norm(x)
         return x
 
@@ -415,11 +424,26 @@ class LLamaForCausalLM(nn.Module):
         if cfg.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
+    def tie_weights(self):
+        """Re-tie lm_head ↔ embed_tokens after load_state_dict(assign=True).
+
+        load_state_dict with assign=True replaces embed_tokens.weight with a
+        new Parameter object, breaking the alias set in __init__.  This method
+        restores the tie so that fast_load_weights / accelerate dispatch_model
+        never see a stale meta tensor on lm_head.
+        """
+        if self.cfg.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
+
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         # shape(batch, max_position_embeddings)
         hidden_state = self.model(idx)
         # batch, max_position_embedding, vocab_size
-        return self.lm_head(hidden_state) 
+        # NOTE: do NOT manually .to() here — when device_map="auto" is used,
+        # accelerate's AlignDevicesHook.pre_forward already moves inputs to the
+        # correct execution device. Calling .to(lm_head.param.device) reads the
+        # offloaded (meta) device and corrupts hidden_state into a meta tensor.
+        return self.lm_head(hidden_state)
 
 
     @classmethod
@@ -427,7 +451,8 @@ class LLamaForCausalLM(nn.Module):
         cls,
         model_name_or_path: str,
         source: str = "local",
-        map_location: Optional[Union[str, torch.device]] = "cpu"
+        map_location: Optional[Union[str, torch.device]] = "cpu",
+        device_map: Optional[Union[str, dict]] = None
     ) -> "LLamaForCausalLM":
         """加载预训练权重。
 
@@ -437,148 +462,124 @@ class LLamaForCausalLM(nn.Module):
                 - "local": 本地训练的模型
                 - "hf": HuggingFace官方下载的预训练权重
             map_location: 设备映射位置，默认 "cpu"
+            device_map: "auto" 或自定义字典，多GPU推理时自动分配层
         """
         if source == "local":
-            return cls._from_local(model_name_or_path, map_location)
+            return cls._from_local(model_name_or_path, map_location, device_map)
         elif source == "hf":
-            return cls._from_hf(model_name_or_path, map_location)
+            return cls._from_hf(model_name_or_path, map_location, device_map)
         else:
             raise ValueError(f"Unknown source: {source}. Must be 'local' or 'hf'")
 
     @classmethod
-    def _from_hf(cls, model_name_or_path: str, map_location: Optional[Union[str, torch.device]] = "cpu"):
-        """从 HuggingFace 官方格式加载"""
-        import os
-        import json
-        from safetensors.torch import load_file
-        from model.llama.weight_convert import convert_safetensors_to_custom
+    def _from_hf(cls, model_name_or_path: str, map_location: Optional[Union[str, torch.device]] = "cpu", device_map: Optional[Union[str, dict]] = None):
+        """从 HuggingFace 官方格式加载，按照权重数据格式加载，不设置自定义格式"""
+        # 1. config
+        with open(os.path.join(model_name_or_path, "config.json")) as f:
+            config = LLamaConfig.from_dict(json.load(f))
 
-        config_path = os.path.join(model_name_or_path, "config.json")
-        safetensors_index_path = os.path.join(model_name_or_path, "model.safetensors.index.json")
-        safetensors_path = os.path.join(model_name_or_path, "model.safetensors")
-        bin_index_path = os.path.join(model_name_or_path, "pytorch_model.bin.index.json")
-        bin_path = os.path.join(model_name_or_path, "pytorch_model.bin")
+        # 2. 解析权重文件
+        shard_files, use_safetensors = resolve_checkpoint_files(model_name_or_path)
 
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Config file not found at {config_path}")
-
-        # 确定权重文件，优先识别分片格式 (LLaMA-2-7B 等大模型为多分片 safetensors)
-        if os.path.exists(safetensors_index_path):
-            use_safetensors, use_sharded, weight_index_file = True, True, safetensors_index_path
-        elif os.path.exists(safetensors_path):
-            use_safetensors, use_sharded, weight_file = True, False, safetensors_path
-        elif os.path.exists(bin_index_path):
-            use_safetensors, use_sharded, weight_index_file = False, True, bin_index_path
-        elif os.path.exists(bin_path):
-            use_safetensors, use_sharded, weight_file = False, False, bin_path
-        else:
-            raise FileNotFoundError(f"Weight file not found at {model_name_or_path}")
-
-        # 1. 读取并转换 config
-        with open(config_path, "r", encoding="utf-8") as f:
-            hf_config_dict = json.load(f)
-        config = LLamaConfig.from_dict(hf_config_dict)
-
-        # 2. 加载权重字典
-        device_str = str(map_location) if map_location else "cpu"
-        if use_sharded:
-            # 读取分片索引，按文件名顺序加载所有分片并合并
-            with open(weight_index_file, "r", encoding="utf-8") as f:
-                index = json.load(f)
-            shard_files = sorted(set(index["weight_map"].values()))
-            hf_state_dict = {}
-            for shard in shard_files:
-                shard_path = os.path.join(model_name_or_path, shard)
-                logger.info(f"Loading shard: {shard}")
-                if use_safetensors:
-                    hf_state_dict.update(load_file(shard_path, device=device_str))
-                else:
-                    hf_state_dict.update(torch.load(shard_path, map_location=map_location, weights_only=False))
-        elif use_safetensors:
-            hf_state_dict = load_file(weight_file, device=device_str)
-        else:
-            hf_state_dict = torch.load(weight_file, map_location=map_location, weights_only=False)
-
-        # 3. 转换为自定义格式（丢弃 rotary_emb.inv_freq，permute Q/K 适配 llama2.c 风格 RoPE）
-        state_dict = convert_safetensors_to_custom(
-            hf_state_dict, config.num_hidden_layers,
-            tie_word_embeddings=config.tie_word_embeddings,
-            n_heads=config.num_attention_heads,
-            n_kv_heads=config.num_key_value_heads,
-        )
-        old_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.bfloat16)
-        # 4. 实例化并加载
-        with torch.device(map_location):
+        with init_empty_weights():
             model = cls(config)
-        torch.set_default_dtype(old_dtype)
-        # strict=False 忽略由于动态计算 freqs_cos/sin buffer 导致的 missing keys 警告
-        model.load_state_dict(state_dict, strict=False)
-
-        return model
-
-    @classmethod
-    def _from_local(cls, model_name_or_path: str, map_location: Optional[Union[str, torch.device]] = "cpu"):
-        """从本地训练保存的模型加载"""
-        import os
-        import json
-        from safetensors.torch import load_file
-        from model.llama.weight_convert import convert_safetensors_to_custom
-
-        # 支持传入目录或具体文件路径
-        if os.path.isdir(model_name_or_path):
-            config_file = os.path.join(model_name_or_path, "config.json")
-            safetensors_file = os.path.join(model_name_or_path, "model.safetensors")
-            bin_file = os.path.join(model_name_or_path, "pytorch_model.bin")
-
-            if os.path.exists(safetensors_file):
-                weight_file = safetensors_file
-                use_safetensors = True
-            elif os.path.exists(bin_file):
-                weight_file = bin_file
-                use_safetensors = False
-            else:
-                raise FileNotFoundError(f"找不到权重文件: {safetensors_file} 或 {bin_file}")
+            
+        if device_map == "auto":
+            # 4. 推断多卡分配
+            device_map = build_auto_device_map(model, no_split_classes=["DecoderLayer"])# 5. 逐shard加载，模型专属的convert逻辑作为 convert_fn 传入
         else:
-            config_file = model_name_or_path.replace(".pt", "_config.json").replace(".bin", "_config.json").replace(".safetensors", "_config.json")
-            weight_file = model_name_or_path
-            use_safetensors = weight_file.endswith(".safetensors")
-
-        if not os.path.exists(config_file):
-            raise FileNotFoundError(f"配置文件不存在: {config_file}")
-
-        # 1. 读取 config
-        with open(config_file) as f:
-            config_dict = json.load(f)
-        config = LLamaConfig.from_dict(config_dict)
-
-        # 2. 加载权重
-        if use_safetensors:
-            state_dict = load_file(weight_file)
-        else:
-            state_dict = torch.load(weight_file, map_location=map_location, weights_only=False)
-
-        # 3. 兼容性检查：如果保存时使用的是 HF 官方格式（包含 gate_proj），则自动调用转换
-        if any("rotary_emb.inv_freq" in k for k in state_dict.keys()):
-            logger.info("检测到包含 gate_proj，执行 HuggingFace -> 自定义格式转换...")
-            state_dict = convert_safetensors_to_custom(
-                state_dict, config.num_hidden_layers,
+            # 单设备：所有参数都去同一个设备，复用同一套加载逻辑
+            device_map = {"": map_location}
+        def convert_fn(shard):
+            return convert_safetensors_to_custom(
+                shard, config.num_hidden_layers,
                 tie_word_embeddings=config.tie_word_embeddings,
                 n_heads=config.num_attention_heads,
                 n_kv_heads=config.num_key_value_heads,
             )
-        
-        old_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.bfloat16)
-        # 4. 实例化并加载
-        with torch.device(map_location):
-            model = cls(config)
-        torch.set_default_dtype(old_dtype)
-        # strict=False 忽略由于动态计算 freqs_cos/sin buffer 导致的 missing keys 警告
-        model.load_state_dict(state_dict, strict=False)
-        
+        fast_load_weights(model, shard_files, use_safetensors, device_map, convert_fn)
         return model
 
+    @classmethod
+    def _from_local(cls, model_name_or_path: str, map_location: Optional[Union[str, torch.device]] = "cpu", device_map: Optional[Union[str, dict]] = None):
+        """从本地训练保存的模型加载，按照权重数据格式加载，不设置自定义格式"""
+        from utils.model_loader import resolve_checkpoint_files
+
+        # 1. config
+        config_file = os.path.join(model_name_or_path, "config.json")
+        if not os.path.exists(config_file):
+            raise FileNotFoundError(f"配置文件不存在: {config_file}")
+
+        with open(config_file) as f:
+            config = LLamaConfig.from_dict(json.load(f))
+
+        # 2. 解析权重文件（支持单文件和分片格式）
+        shard_files, use_safetensors = resolve_checkpoint_files(model_name_or_path)
+
+        # 3. convert_fn：本地格式通常已是自定义格式，但兼容 HF 格式保存的情况
+        def convert_fn(shard):
+            if any("rotary_emb.inv_freq" in k for k in shard):
+                logger.info("检测到 HF 格式权重，执行转换...")
+                return convert_safetensors_to_custom(
+                    shard, config.num_hidden_layers,
+                    tie_word_embeddings=config.tie_word_embeddings,
+                    n_heads=config.num_attention_heads,
+                    n_kv_heads=config.num_key_value_heads,
+                )
+            return shard  # 已是自定义格式，直接透传
+
+        # 4. meta tensor 初始化
+        with init_empty_weights():
+            model = cls(config)
+
+        # 5. device_map
+        if device_map == "auto":
+            device_map = build_auto_device_map(model, no_split_classes=["DecoderLayer"])
+        else:
+            device_map = {"": map_location}
+
+        # 6. 加载（支持单文件和分片）
+        fast_load_weights(model, shard_files, use_safetensors, device_map, convert_fn)
+        return model
+
+    @classmethod
+    def from_empty(
+        cls,
+        cfg: "LLamaConfig",
+        map_location: Optional[Union[str, torch.device]] = "cpu",
+        device_map: Optional[Union[str, dict]] = None,
+    ) -> "LLamaForCausalLM":
+        """仅用于架构测试（不加载任何权重），支持 device_map='auto'。
+        没有 checkpoint 可以参考 dtype
+        Args:
+            cfg: 模型配置
+            map_location: 单设备模式下的目标设备，默认 "cpu"
+            device_map: "auto" 表示多卡自动分配，否则走单设备路径
+        """
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            if device_map == "auto":
+                with init_empty_weights():
+                    model = cls(cfg)
+                resolved_map = build_auto_device_map(model, no_split_classes=["DecoderLayer"])
+                # 将 meta tensor 就地实例化到目标设备（值随机，仅验证架构维度）
+                for mod_name, mod in model.named_modules():
+                    tgt = resolved_map.get(mod_name, resolved_map.get("", "cpu"))
+                    for param_name, p in mod.named_parameters(recurse=False):
+                        if p.is_meta:
+                            mod._parameters[param_name] = nn.Parameter(
+                                torch.empty(p.shape, dtype=p.dtype, device=tgt),
+                                requires_grad=p.requires_grad,
+                            )
+                    for buf_name, b in mod.named_buffers(recurse=False):
+                        if b.is_meta:
+                            mod._buffers[buf_name] = torch.empty(b.shape, dtype=b.dtype, device=tgt)
+            else:
+                with torch.device(map_location or "cpu"):
+                    model = cls(cfg)
+        finally:
+            torch.set_default_dtype(torch.float32)
+        return model
 
     @torch.no_grad()
     def generate(
@@ -601,6 +602,11 @@ class LLamaForCausalLM(nn.Module):
             logits = self(idx_cond)
             logits = logits[:, -1, :]
 
+            # Upcast and sanitize before any masking — bfloat16 overflow can
+            # produce NaN in the raw logits, which poisons topk and softmax.
+            logits = logits.float()
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
+
             if top_k is not None and do_sample:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float("-inf")
@@ -612,7 +618,7 @@ class LLamaForCausalLM(nn.Module):
                 probs = nn.functional.softmax(logits, dim=-1)
                 idx_next = torch.multinomial(probs, num_samples=1)
 
-            idx = torch.cat((idx, idx_next), dim=1)
+            idx = torch.cat((idx, idx_next.to(idx.device)), dim=1)
 
             if eos_token_id is not None and (idx_next == eos_token_id).all():
                 break
@@ -629,27 +635,30 @@ if __name__ == "__main__":
     from model.llama.config import LLamaConfig
     from config import SOURCE_DIR, OUT_DIR
     from tokenizers import Tokenizer
-    load_pretrained_mode = LoadMode.PRETRAINED
+    load_pretrained_mode = LoadMode.CONTINUAL
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/llama/tiny_llama/tokenizer.json")
     tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/llama/llama-2-7b/tokenizer.json")
+    # tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/llama/llama-3-8b/tokenizer.json")
     # cfg = LLamaConfig.tiny_llama()
-    cfg = LLamaConfig.llama2_7b()
+    # cfg = LLamaConfig.llama2_7b()
+    cfg = LLamaConfig.llama3_8b()
     torch.manual_seed(123)
-    with torch.device(device):
-        torch.set_default_dtype(torch.bfloat16)
-        model = LLamaForCausalLM(cfg)
-        torch.set_default_dtype(torch.float32)
-        
+
     """
     # 加载权重测试
     """
     if load_pretrained_mode == LoadMode.PRETRAINED:
         # model = LLamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/tiny_llama", source="hf", map_location=device)
-        model = LLamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/llama-2-7b", source="hf", map_location=device)
+        # model = LLamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/llama-2-7b", source="hf", map_location=device)
+        model = LLamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/llama-3-8b", source="hf", device_map="auto")
     elif load_pretrained_mode == LoadMode.CONTINUAL:
         # model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_tiny_llama", source="local", map_location=device)
-        model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_llama2_7b", source="local", map_location=device)
+        # model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_llama2_7b", source="local", map_location=device)
+        model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_llama2_7b", source="local", device_map="auto")
+    else:
+        # 仅测试模型架构（不加载权重），与 PRETRAINED/CONTINUAL 同步支持 device_map="auto"
+        model = LLamaForCausalLM.from_empty(cfg, device_map="auto")
     
     """
     # 前向测试
@@ -674,5 +683,5 @@ if __name__ == "__main__":
     """
     model.eval()
     prompt = torch.tensor(tokenizer.encode("Hello, I am").ids).unsqueeze(0).to(device) # (3,) -> (1, 3)
-    out = model.generate(prompt, max_new_tokens=50, top_k=50, temperature=0.8) # (1, 3) -> (1, 13)
+    out = model.generate(prompt, max_new_tokens=250, top_k=50, temperature=0.8) # (1, 3) -> (1, 13)
     print(f"\nGenerated: {tokenizer.decode(out[0].tolist())}") # (1, 13) -> (13,) -> list -> str

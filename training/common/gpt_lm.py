@@ -46,7 +46,12 @@ class GPT2LM(LM):
             lm = GPT2LM(model=model, device=device, tokenizer=tokenizer)
         """
         super().__init__()
-        self.model = model.to(device).eval()
+        # 如果模型已经通过 accelerate dispatch_model / device_map="auto" 分配到多卡，
+        # 不能再调用 .to(device)，否则会破坏 hook 的设备映射，导致 device 混乱。
+        _has_accelerate_hooks = any(hasattr(m, '_hf_hook') for m in model.modules())
+        if not _has_accelerate_hooks:
+            model = model.to(device)
+        self.model = model.eval()
         self._device = device
         self.tokenizer = Tokenizer.from_pretrained(model_name) if tokenizer is None else tokenizer
         if self.tokenizer is None:
@@ -121,7 +126,7 @@ class GPT2LM(LM):
             
             # shape(1, 6)
             input_tensor = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(self._device)
-            
+
             with torch.no_grad():
                 # shape(1, 6, vocab_size)
                 logits = self.model(input_tensor)

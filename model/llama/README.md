@@ -52,3 +52,7 @@ https://github.com/DLLXW/baby-llama2-chinese.git
 2026/07/29 
     先完成模型架构、训练和推理，然后进行参数冻结测试
 
+llama/model 脚本 模型加载有问题（scratch模式），显存加载半天上不来，模型加载缓慢
+train_llama脚本 CONTINUAL TRANSFORMERS  加载模型未更新，应该使用最新的load_checkpoint函数.还需要测试训练脚本
+
+

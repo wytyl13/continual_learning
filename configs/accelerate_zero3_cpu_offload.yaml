@@ -1,0 +1,17 @@
+# 单卡大模型配置：ZeRO-3 + CPU 全卸载
+# 适用：单张 24GiB 显卡训练 7B 模型，显存只需 ~2GiB，CPU 内存需 ~103GiB
+# 用法: accelerate launch --config_file configs/accelerate_zero3_cpu_offload.yaml -m training.train_llama
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+mixed_precision: bf16
+num_machines: 1
+num_processes: 1
+use_cpu: false
+deepspeed_config:
+  gradient_accumulation_steps: 4
+  gradient_clipping: 1.0
+  offload_optimizer_device: cpu     # Adam 状态卸载到 CPU (~75GiB)
+  offload_param_device: cpu         # 参数卸载到 CPU，GPU 只保留当前层 (~13GiB)
+  zero3_init_flag: true             # ZeRO-3 接管模型初始化，避免初始化时 OOM
+  zero3_save_16bit_model: true      # 保存时合并参数为完整 bf16 权重
+  zero_stage: 3

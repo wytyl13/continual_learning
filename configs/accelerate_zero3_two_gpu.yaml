@@ -1,0 +1,45 @@
+# LLaMA-2-7B 训练内存全景分析
+
+# 基础公式
+
+# 每个参数在 bf16 混精度训练下需要存储 5 种状态：
+
+
+
+# P × 2→ bf16 模型权重（前向推理用）
+
+# P × 2 → bf16 梯度（反向传播产生）
+
+# P × 4 → fp32 主参数（混精度训练必须保留，防止精度损失）
+
+# P × 4 → fp32 Adam 一阶矩（动量）
+
+# P × 4 → fp32 Adam 二阶矩（方差）
+
+# ─────────────────────────
+
+# P × 16 → 合计 = 6.74B × 16（bytes） = 100.4 GiB
+
+# offload_param_device 参数 ~13GiB=6.74B × 2 = 13.48 B bytes / 1024^3 = 12.55422830581665 G
+# offload_optimizer_device 
+  # 优化器，优先卸载~75GiB = 6.74B * 12(包含一阶矩、二阶矩和主参数（float32）) = 80.88 B bytes / 1024^3 = 75.3253698348999G
+# 激活值 在梯度检查点控制
+# 梯度 生命周期极短，用完即销毁的临时数据，没有常驻显存的必要。
+# 当你设置 offload_optimizer_device: cpu 时，梯度会隐式地随optimizer step 一起在 CPU 上处理，因为优化器更新需要梯度，两者是绑定的。
+
+# 用法: PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128" accelerate launch --config_file configs/accelerate_zero3_two_gpu.yaml -m training.train_llama
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+mixed_precision: bf16
+num_machines: 1
+num_processes: 2              # 修改为实际 GPU 数量
+use_cpu: false
+deepspeed_config:
+  gradient_accumulation_steps: 4
+  gradient_clipping: 1.0
+  offload_optimizer_device: cpu
+  offload_param_device: cpu
+  zero3_init_flag: true
+  zero3_save_16bit_model: true
+  zero_stage: 3
+  sub_group_size: 100000000

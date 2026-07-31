@@ -13,7 +13,8 @@ import torch
 import time
 from tokenizers import Tokenizer
 from safetensors.torch import load_file
-
+from accelerate.utils import DeepSpeedPlugin
+from accelerate import Accelerator
 
 from model.llama.model import LLamaModel, LLamaConfig, LLamaForCausalLM
 from training import create_dataloader
@@ -26,91 +27,70 @@ from utils.enums import ModelType, LoadMode
 logger = get_logger(__name__)
 
 if __name__ == "__main__":
-    batch_size = 2
+    # cpu初始化模型权重参数，由accelerate prepare自动分配显存
+    batch_size = 1
     lr=5e-5
     weight_decay=0.1
-    # ==========================================
-    # DeepSpeed 优化器卸载配置
-    # ==========================================
-    ds_config = {
-        "train_micro_batch_size_per_gpu": batch_size, # 必须与你 dataloader 的 batch_size 一致
-        "gradient_accumulation_steps": 1,    # 如果需要模拟更大 batch，可调大此值
-        "optimizer": {
-            "type": "AdamW",
-            "params": {
-                "lr": lr,
-                "weight_decay": weight_decay
-            }
-        },
-        "bf16": {
-            "enabled": True  # 强制半精度训练
-        },
-        "zero_optimization": {
-            "stage": 2,      # 开启 ZeRO-2
-            "offload_optimizer": {
-                "device": "cpu",   # 将优化器状态（约 8.8GB）卸载到 CPU 主存
-                "pin_memory": True # 锁页内存加速拷贝
-            },
-            "overlap_comm": True,
-            "contiguous_gradients": True
-        }
-    }
-    
-    
-    import deepspeed
     from model.llama.model import LLamaForCausalLM
     from transformers import LlamaForCausalLM, LlamaConfig
     from model.llama.weight_convert import convert_custom_to_hf
     # 初始化模型
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 使用枚举进行模式选择
-    load_pretrained_mode = LoadMode.CONTINUAL 
-    model_type = ModelType.CUSTOM
-    DEEPSPEED_FLAG = 0
+    load_pretrained_mode = LoadMode.SCRATCH 
+    model_type = ModelType.TRANSFORMERS
     tokenizer = Tokenizer.from_pretrained("NousResearch/Llama-2-7b-hf")
-    context_length = 256
     # llama_cfg: LLamaConfig = LLamaConfig.tiny_llama() 
     llama_cfg: LLamaConfig = LLamaConfig.llama2_7b() 
+    context_length = 256
+    torch.manual_seed(123)
     if model_type == ModelType.TRANSFORMERS:
         llama_cfg = LlamaConfig(**llama_cfg.to_transformers_dict())
-    with torch.device(device):
-        old_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.bfloat16)
-        if model_type == ModelType.CUSTOM:
-            model = LLamaForCausalLM(llama_cfg)
-        else:
-            model = LlamaForCausalLM(llama_cfg)
-        torch.set_default_dtype(old_dtype)
-    
     
     # 加载模型权重
     if load_pretrained_mode == LoadMode.PRETRAINED:
         if model_type == ModelType.CUSTOM:
             # tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/llama/tiny_llama/tokenizer.json") # 效果等同于Tokenizer.from_pretrained("NousResearch/Llama-2-7b-hf")
+            # model = LLamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/tiny_llama", source="hf", map_location="cpu")
             model = LLamaForCausalLM.from_pretrained(
-                # f"{SOURCE_DIR}/hf/llama/tiny_llama", 
-                f"{SOURCE_DIR}/hf/llama/llama-2-7b", 
+                f"{SOURCE_DIR}/hf/llama/llama-2-7b",
                 source="hf",
-                map_location=device
+                map_location="cpu"
             )
         elif model_type == ModelType.TRANSFORMERS:
-            # model = LlamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/tiny_llama", torch_dtype=torch.bfloat16, device_map=device)
-            model = LlamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/llama-2-7b", torch_dtype=torch.bfloat16, device_map=device)
+            # model = LlamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/tiny_llama", torch_dtype=torch.bfloat16)
+            model = LlamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/llama-2-7b", torch_dtype=torch.bfloat16)
     elif load_pretrained_mode == LoadMode.CONTINUAL:
         if model_type == ModelType.CUSTOM:
             # tokenizer = Tokenizer.from_file(f"{OUT_DIR}/train_simple_20260730_tiny_llama/tokenizer.json") # 如果没有新增或删除，效果等同于Tokenizer.from_pretrained("NousResearch/Llama-2-7b-hf")
-            # model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_tiny_llama", source="local", map_location=device)    
-            model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_llama2_7b", source="local", map_location=device)    
+            # model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_tiny_llama", source="local", map_location="cpu")    
+            model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_llama2_7b", source="local", map_location="cpu")    
         elif model_type == ModelType.TRANSFORMERS:
+            with torch.device("cpu"):
+                old_dtype = torch.get_default_dtype()
+                torch.set_default_dtype(torch.bfloat16)
+                model = LlamaForCausalLM(llama_cfg)
+                torch.set_default_dtype(old_dtype)
             try:
-                # custom_sd = torch.load(f"{OUT_DIR}/train_simple_20260730_tiny_llama/pytorch_model.bin", weights_only=True, map_location=device) 
-                custom_sd = torch.load(f"{OUT_DIR}/train_simple_20260730_llama2_7b/pytorch_model.bin", weights_only=True, map_location=device) 
+                # custom_sd = torch.load(f"{OUT_DIR}/train_simple_20260730_tiny_llama/pytorch_model.bin", weights_only=True, map_location="cpu") 
+                custom_sd = torch.load(f"{OUT_DIR}/train_simple_20260730_llama2_7b/pytorch_model.bin", weights_only=True, map_location="cpu") 
             except Exception as e:
-                # custom_sd = load_file(f"{OUT_DIR}/train_simple_20260730_tiny_llama/model.safetensors", device=str(device))
-                custom_sd = load_file(f"{OUT_DIR}/train_simple_20260730_llama2_7b/model.safetensors", device=str(device))
+                # custom_sd = load_file(f"{OUT_DIR}/train_simple_20260730_tiny_llama/model.safetensors", device="cpu")
+                custom_sd = load_file(f"{OUT_DIR}/train_simple_20260730_llama2_7b/model.safetensors", device="cpu")
             hf_sd = convert_custom_to_hf(custom_sd)
             model.load_state_dict(hf_sd)
+    else:
+        # 随机初始化，cpu 上建好再由 Accelerate prepare 分配（训练路径不能用 device_map="auto"）
+        if model_type == ModelType.CUSTOM:
+            model = LLamaForCausalLM.from_empty(llama_cfg, map_location="cpu")
+        else:
+            with torch.device("cpu"):
+                old_dtype = torch.get_default_dtype()
+                torch.set_default_dtype(torch.bfloat16)
+                model = LlamaForCausalLM(llama_cfg)
+                torch.set_default_dtype(old_dtype)
+    
     
     # 初始化训练数据
     with open(f"{SOURCE_DIR}/the-verdict.txt") as f:
@@ -133,38 +113,43 @@ if __name__ == "__main__":
         tokenizer,
         max_length=context_length,
         stride=context_length // 2,
-        batch_size=batch_size
+        batch_size=batch_size,
+        shuffle=False,    # 验证集不需要打乱
+        drop_last=False   # 样本少时不丢弃，防止分布式后 loader 为空
     )
     
-    
+    # 自动读取 --config_file 指定的 YAML
+    accelerator = Accelerator()
     # 初始化优化器
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    if DEEPSPEED_FLAG:
-        model_engine, optimizer, _, _ = deepspeed.initialize(
-            model=model,
-            model_parameters=model.parameters(),
-            config=ds_config
-        )
+    # 可以在这里设置梯度检查点，梯度检查点节省的显存大小和batch, 
+    # max_position_embeddings有直接关系。
+    # Accelerate 接管设备管理
+    model, optimizer, train_loader, val_loader = accelerator.prepare(
+        model, optimizer, train_loader, val_loader
+    )
+    device = accelerator.device
     
     # 执行训练
     train_losses, val_losses, tokens_seen = train_model(
-        model=model_engine if DEEPSPEED_FLAG else model, # model
+        model=model,
         train_loader=train_loader,
         val_loader=val_loader,
         optimizer=optimizer,
         device=device,
-        num_epochs=10,
-        eval_freq=50,
+        num_epochs=2,
+        eval_freq=5,
         eval_iter=5,
         start_context="Every effort moves you",
         context_size=context_length,
         tokenizer=tokenizer,
         generate_sample_temperature=0.8,
         generate_sample_top_k=50,
-        patience=3,
+        patience=1,
         # save_dir=f"{OUT_DIR}/train_simple_20260730_tiny_llama",
         save_dir=f"{OUT_DIR}/train_simple_20260730_llama2_7b",
-        model_type=model_type
+        model_type=model_type,
+        accelerator=accelerator
     )
 
 

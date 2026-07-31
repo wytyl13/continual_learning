@@ -13,6 +13,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from safetensors.torch import save_file
+from huggingface_hub import split_torch_state_dict_into_shards
 from dataclasses import asdict
 
 from model.gpt2.model import ModelType
@@ -39,10 +40,11 @@ def calc_loss_batch(input_batch, target_batch, model, device):
     calculate the batch loss.
     """
     # input_batch(batch, seq_length)
-    input_batch = input_batch.to(device)
+    # accelerate接管之后不再需要to指定设别
+    # input_batch = input_batch.to(device)
 
     # target_batch(batch, seq_length)
-    target_batch = target_batch.to(device)
+    # target_batch = target_batch.to(device)
 
     # iuput(batch, seq_length) -> out(batch, seq_length, vocab_size)
     logits = model(input_batch)
@@ -221,47 +223,54 @@ def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
     plt.savefig("loss_plot.png", dpi=300, bbox_inches="tight")
 
 
-def save_model(model, save_dir, tokenizer=None):
-      os.makedirs(save_dir, exist_ok=True)
-
-      # 保存权重，处理共享权重
-      state_dict = model.state_dict()
-      # 如果有weight tying，复制一份lm_head.weight避免共享内存
-      config = getattr(model, 'cfg', None) or getattr(model, 'config', None)
-      if config and getattr(config, 'tie_word_embeddings', False):
-          if 'lm_head.weight' in state_dict:
+def save_model(model, save_dir, tokenizer=None, state_dict=None):
+    os.makedirs(save_dir, exist_ok=True)
+    if state_dict is None:
+        # 保存权重，处理共享权重
+        state_dict = model.state_dict()
+    # 如果有weight tying，复制一份lm_head.weight避免共享内存
+    config = getattr(model, 'cfg', None) or getattr(model, 'config', None)
+    if config and getattr(config, 'tie_word_embeddings', False):
+        if 'lm_head.weight' in state_dict:
             state_dict['lm_head.weight'] = state_dict['lm_head.weight'].clone()
-      save_file(state_dict, f"{save_dir}/model.safetensors")
+    split = split_torch_state_dict_into_shards(state_dict, max_shard_size="5GB")
+    for filename, tensor_keys in split.filename_to_tensors.items():
+        shard = {k: state_dict[k] for k in tensor_keys}
+        save_file(shard, os.path.join(save_dir, filename))
+    if split.is_sharded:
+        index = {"metadata": split.metadata, "weight_map": split.tensor_to_filename}
+        with open(os.path.join(save_dir, "model.safetensors.index.json"), "w") as f:
+            json.dump(index, f, indent=2)
 
-      # 保存config
-      if config:
+    # 保存config
+    if config:
         # 兼容dataclass和transformers config
         if hasattr(config, 'to_dict'):  # transformers config
             config_dict = config.to_dict()
         else:  # dataclass
             config_dict = asdict(config)
-      with open(f"{save_dir}/config.json", "w") as f:
-          json.dump(config_dict, f, indent=2)
+        with open(f"{save_dir}/config.json", "w") as f:
+            json.dump(config_dict, f, indent=2)
 
-      # 保存tokenizer
-      if tokenizer is not None:
-          if hasattr(tokenizer, 'save'):  # tokenizers库
-              tokenizer.save(f"{save_dir}/tokenizer.json")
-              logger.info(f"Tokenizer saved: {save_dir}/tokenizer.json")
-          elif hasattr(tokenizer, 'save_pretrained'):  # transformers库
-              tokenizer.save_pretrained(save_dir)
-              logger.info(f"Tokenizer saved: {save_dir}")
-          else:
-              logger.warning(f"tokenizer类型 {type(tokenizer)} 不支持保存")
+    # 保存tokenizer
+    if tokenizer is not None:
+        if hasattr(tokenizer, 'save'):  # tokenizers库
+            tokenizer.save(f"{save_dir}/tokenizer.json")
+            logger.info(f"Tokenizer saved: {save_dir}/tokenizer.json")
+        elif hasattr(tokenizer, 'save_pretrained'):  # transformers库
+            tokenizer.save_pretrained(save_dir)
+            logger.info(f"Tokenizer saved: {save_dir}")
+        else:
+            logger.warning(f"tokenizer类型 {type(tokenizer)} 不支持保存")
 
-      logger.info(f"Model saved: {save_dir}")
+    logger.info(f"Model saved: {save_dir}")
 
 
 def train_model(model, train_loader, val_loader,
                 optimizer, device, num_epochs,
                 eval_freq, eval_iter, start_context, context_size, tokenizer,
                 generate_sample_temperature=1.0, generate_sample_top_k=None,
-                patience=5, save_dir="best_model.pt", model_type="gpt2"):
+                patience=5, save_dir="best_model.pt", model_type="gpt2", accelerator=None):
     """
     通用的模型训练函数。
 
@@ -287,26 +296,23 @@ def train_model(model, train_loader, val_loader,
 
     for epoch in range(num_epochs):
         model.train()
-        is_deepspeed = hasattr(model, "backward") and hasattr(model, "step")
 
         for input_batch, target_batch in train_loader:
             # 梯度清零
-            if not is_deepspeed:
-                optimizer.zero_grad()
+            optimizer.zero_grad()
 
             # 前向传播
             loss = calc_loss_batch(
                 input_batch, target_batch, model, device
             )
 
-            if is_deepspeed:
-                # DeepSpeed 模式：引擎自动处理梯度累加、显存卸载和清零
-                model.backward(loss)
-                model.step()
+            if accelerator is not None:
+                # accelerator 模式
+                accelerator.backward(loss)
             else:
                 # 原生 PyTorch 模式
                 loss.backward()
-                optimizer.step()
+            optimizer.step()
 
             # 计算累积token数
             tokens_seen += input_batch.numel()
@@ -328,12 +334,29 @@ def train_model(model, train_loader, val_loader,
                 if  val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0
-                    save_model(model, save_dir, tokenizer)
+                    if accelerator is not None:
+                        accelerator.wait_for_everyone() # 同步所有进程
+                        unwrapped_model = accelerator.unwrap_model(model)  # 去掉 DDP/ZeRO 包装
+                        # ZeRO-3 需要用 get_state_dict 触发 all-gather，
+                        # 直接调 state_dict() 只得到本卡分片（shape=[0]）
+                        state_dict = accelerator.get_state_dict(model)
+                        if accelerator.is_main_process:  # 只在主进程保存
+                            alloc = torch.cuda.memory_allocated() / 1024**3
+                            reserved = torch.cuda.memory_reserved() / 1024**3
+                            print(f"GPU memory — allocated: {alloc:.2f} GiB | reserved: {reserved:.2f} GiB")
+                            save_model(unwrapped_model, save_dir, tokenizer, state_dict)
+                        # all-gather 会临时占满整卡显存，保存完立即释放
+                        del state_dict
+                        torch.cuda.empty_cache()
+                        accelerator.wait_for_everyone()
+                    else:
+                        save_model(model, save_dir, tokenizer)
                     
                 else:
                     patience_counter += 1
-                    logger.info(f"Early stoppint triggered.")
-                    return train_losses, val_losses, track_token_seen
+                    if patience_counter >= patience:
+                        logger.info(f"Early stopping triggered (patience={patience}).")
+                        return train_losses, val_losses, track_token_seen
                     
 
         # 每个 epoch 结束后生成样本

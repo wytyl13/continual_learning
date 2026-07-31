@@ -48,6 +48,10 @@ HF_ENDPOINT=https://hf-mirror.com huggingface-cli download NousResearch/Llama-2-
   --include "*.safetensors" "*.json" "*.txt" "*.model" --exclude "*.bin"
 
 
+HF_ENDPOINT=https://hf-mirror.com huggingface-cli download NousResearch/Meta-Llama-3-8B \
+  --local-dir /root/autodl-tmp/continual_learning_data/source/hf/llama/llama-3-8b \
+  --include "*.safetensors" "*.json" "*.txt" "*.model" --exclude "*.bin"
+
 deepspeed --num_gpus=1 --module training.train_llama
 python -m training.train_llama
 
@@ -201,3 +205,5 @@ BF16：符号位 1bit，指数位 8bit，指数偏移量为127，尾数位=16-1-
 在部署边缘侧实时计算机视觉（CV）系统时，通常面对的是推理（Inference）阶段。此时模型的权重已经固定，数值范围是已知且可控的。
 *   **FP16 的优势：** 相比 BF16，FP16 多了 3 个比特的尾数位，**精度更高**。在处理图像数据时，这微小的精度优势有助于更好地保留空间特征和细节。
 *   **落地实践：** 部署高性能 C++ 推理引擎（如 TensorRT）时，通常可以通过校准（Calibration）或量化感知训练，将模型权重安全地映射到 FP16 的范围内，从而在不损失精度的前提下，最大化利用 GPU 的 Tensor Core，轻松达成 200ms 以内的实时延迟要求。
+
+

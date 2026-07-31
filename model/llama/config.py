@@ -120,11 +120,15 @@ class LLamaConfig:
         return cls(
             vocab_size=128256,
             hidden_size=4096,
+            intermediate_size=14336,          # 必须显式设置，自动计算会得到 11008
             num_attention_heads=32,
             num_key_value_heads=8,
             num_hidden_layers=32,
             max_position_embeddings=8192,
-            rope_theta=500000.0
+            rope_theta=500000.0,
+            tie_word_embeddings=False,# LLaMA3 不绑定词嵌入
+            bos_token_id=128000,               # LLaMA3 专用特殊 token
+            eos_token_id=128001
         )
         
     @classmethod
