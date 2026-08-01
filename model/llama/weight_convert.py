@@ -5,6 +5,12 @@
 @Author : weiyutao
 @File : weight_convert.py
 
+注意state_dict中的键只存储下面模型架构中的括号里面的内容（路径名）
+比如model.embed_tokens
+比如model.layers.0.input_layernorm
+类名 DecoderLayer、SwiGLU不存储
+这里注意路径名和类名的区别，类名只有那一个作用no_split_classes
+所有的state_dict转换和device_map使用的都是路径名
 ================================================================================
 自定义LLAMA格式：
 ================================================================================

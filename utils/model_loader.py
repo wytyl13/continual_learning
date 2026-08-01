@@ -39,7 +39,7 @@ def resolve_checkpoint_files(model_dir: str) -> tuple[list[str], bool]:
   
 def build_auto_device_map(
     model: torch.nn.Module,
-    no_split_classes: list[str],
+    no_split_classes: list[str] = None,
     dtype: torch.dtype = torch.bfloat16,
 ) -> dict:
     """
@@ -49,6 +49,9 @@ def build_auto_device_map(
     from accelerate import infer_auto_device_map
     from accelerate.utils import get_balanced_memory
 
+    if no_split_classes is None:
+        no_split_classes = getattr(model, "_no_split_modules", [])
+
     # 在计算设备映射前，务必先绑定权重，否则 accelerate 会将共享权重的层分到不同的 GPU
     if hasattr(model, 'tie_weights'):
         model.tie_weights()
@@ -57,6 +60,9 @@ def build_auto_device_map(
         model, no_split_module_classes=no_split_classes,
         dtype=dtype, low_zero=False,
     )
+    # infer_auto_device_map 输出的是路径名 → 设备 的字典
+    # device_map = {"model.layers.0": "cuda:0", ...}
+    # no_split_module_classes 只是通过类名称去找，最终存储的device_map还是路径名
     return infer_auto_device_map(
         model, max_memory=max_memory,
         no_split_module_classes=no_split_classes,
@@ -106,6 +112,72 @@ def fast_load_weights(
     from accelerate import dispatch_model
     dispatch_model(model, device_map=device_map)
     
+
+def materialize_meta_model(
+    model: torch.nn.Module,
+    device_map: dict,
+) -> torch.nn.Module:
+    """
+    将 init_empty_weights() 初始化的 meta 模型就地实例化到目标设备，
+    并安装 accelerate dispatch hooks。
+
+    可复用于任何 nn.Module（自定义模型或 HF Transformers 模型）。
+    修复了常见的两个问题：
+      1. 精确 key 匹配 → 最长前缀匹配：infer_auto_device_map 的键粒度是
+         no_split_classes 层级（如 "model.layers.0"），叶子模块
+         （如 "model.layers.0.self_attn.q_proj"）不在 map 里，
+         必须向上找最近的父级条目。
+      2. meta_to_real 去重：防止绑定权重（lm_head ↔ embed_tokens）
+         被分配两次，浪费 ~1 GB 显存。
+
+    Args:
+        model:      由 init_empty_weights() 创建的 meta 模型
+        device_map: build_auto_device_map 返回的模块名 → 设备映射
+
+    Returns:
+        安装好 accelerate hooks 的模型（原地修改，同时也作为返回值）
+    """
+    sorted_prefixes = sorted(device_map, key=len, reverse=True)
+
+    def _find_device(mod_name: str) -> str:
+        for prefix in sorted_prefixes:
+            if prefix == "" or mod_name == prefix or mod_name.startswith(prefix + "."):
+                return device_map[prefix]
+        return "cpu"
+
+    meta_to_real: dict[int, torch.Tensor] = {}
+    for mod_name, mod in model.named_modules():
+        tgt = _find_device(mod_name)
+        for param_name, p in mod.named_parameters(recurse=False):
+            if p.is_meta:
+                pid = id(p)
+                if pid in meta_to_real:
+                    mod._parameters[param_name] = torch.nn.Parameter(
+                        meta_to_real[pid], requires_grad=p.requires_grad
+                    )
+                else:
+                    real = torch.empty(p.shape, dtype=p.dtype, device=tgt)
+                    meta_to_real[pid] = real
+                    mod._parameters[param_name] = torch.nn.Parameter(
+                        real, requires_grad=p.requires_grad
+                    )
+        for buf_name, b in mod.named_buffers(recurse=False):
+            if b.is_meta:
+                bid = id(b)
+                if bid in meta_to_real:
+                    mod._buffers[buf_name] = meta_to_real[bid]
+                else:
+                    real = torch.empty(b.shape, dtype=b.dtype, device=tgt)
+                    meta_to_real[bid] = real
+                    mod._buffers[buf_name] = real
+
+    from accelerate import dispatch_model
+    if hasattr(model, "tie_weights"):
+        model.tie_weights()
+    dispatch_model(model, device_map=device_map)
+    torch.cuda.empty_cache()
+    return model
+
 
 def resolve_local_checkpoint(model_name_or_path: str) -> tuple[str, str, bool]:
     """

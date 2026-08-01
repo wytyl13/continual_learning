@@ -219,7 +219,14 @@ class LLamaConfig:
             "rope_scaling": None,
             "use_cache": True
         }
-    
+  
+  
+MODEL_CONFIGS = {
+    "tiny_llama": LLamaConfig.tiny_llama(),
+    "llama-2-7b": LLamaConfig.llama2_7b(),
+    "llama-3-8b": LLamaConfig.llama3_8b()
+}
+  
 if __name__ == "__main__":
     from tokenizers import Tokenizer
     from config import SOURCE_DIR, OUT_DIR

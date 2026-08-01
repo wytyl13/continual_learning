@@ -8,6 +8,21 @@
 
 import logging
 import sys
+from contextlib import contextmanager
+import time
+
+@contextmanager
+def log_stage(logger, name: str):
+    """包裹耗时操作，自动打印开始/结束/耗时。"""
+    logger.info(f"{name} ...")
+    t0 = time.perf_counter()
+    try:
+        yield
+    except Exception:
+        logger.error(f"{name} 失败，耗时 {time.perf_counter() - t0:.1f}s")
+        raise
+    logger.info(f"{name} 完成，耗时 {time.perf_counter() - t0:.1f}s")
+
 
 def get_logger(name: str, log_file: str = None, level=logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)

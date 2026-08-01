@@ -10,20 +10,29 @@ llama model architecture.
 """
 import torch
 import torch.nn as nn
-from typing import Tuple, Optional, Union
+from typing import Tuple, Optional, Union, Generator
 import math
 import inspect
 import json
 import os
 from accelerate import init_empty_weights
+from tokenizers import Tokenizer
 
-from model.llama.config import LLamaConfig
+from model.llama.config import LLamaConfig, MODEL_CONFIGS
 from model.gpt2.model import GELU
 from model.llama.weight_convert import convert_safetensors_to_custom
 
-from utils.model_loader import resolve_checkpoint_files, build_auto_device_map, fast_load_weights
-from utils.logger import get_logger
-from utils.enums import LoadMode, ModelType
+from config import SOURCE_DIR, OUT_DIR
+
+from utils.model_loader import (
+    resolve_checkpoint_files, 
+    build_auto_device_map, 
+    fast_load_weights, 
+    materialize_meta_model
+)
+
+from utils.logger import get_logger, log_stage
+from utils.enums import LoadMode, ModelName
 
 
 logger = get_logger(__name__)
@@ -415,14 +424,19 @@ class LLamaModel(nn.Module):
 
 
 class LLamaForCausalLM(nn.Module):
+    # 给定 N 块 GPU，把模型的层分配上去时，哪些层不允许被切断放到两块不同 GPU 上？
+    # transformers 的模型架构有相同的属性
+    _no_split_modules = ["DecoderLayer"] 
+    
     def __init__(self, cfg: LLamaConfig):
         super().__init__()
         self.cfg = cfg
         self.model = LLamaModel(cfg)
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
-
-        if cfg.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+        self.tie_weights()
+        
+        # if cfg.tie_word_embeddings:
+        #     self.lm_head.weight = self.model.embed_tokens.weight
 
     def tie_weights(self):
         """Re-tie lm_head ↔ embed_tokens after load_state_dict(assign=True).
@@ -473,7 +487,15 @@ class LLamaForCausalLM(nn.Module):
 
     @classmethod
     def _from_hf(cls, model_name_or_path: str, map_location: Optional[Union[str, torch.device]] = "cpu", device_map: Optional[Union[str, dict]] = None):
-        """从 HuggingFace 官方格式加载，按照权重数据格式加载，不设置自定义格式"""
+        """从 HuggingFace 官方格式加载，按照权重数据格式加载，不设置自定义格式
+        本地文件加载，必须经过cpu，逐shard加载会提高效率和降低cpu占用峰值。
+            map_location:
+                cpu: 将本地权重全部加载到cpu
+                cuda:0: 将本地权重先全部加载到cpu，然后传输到cuda:0，传输方式同device_map
+            device_map:
+                auto: 根据多卡自动计算map映射，然后逐shard 先加载到cpu，然后根据map传输到指定的GPU设备上
+                传递一个字典：按照字典的结构将指定层传递到指定GPU上
+        """
         # 1. config
         with open(os.path.join(model_name_or_path, "config.json")) as f:
             config = LLamaConfig.from_dict(json.load(f))
@@ -486,7 +508,7 @@ class LLamaForCausalLM(nn.Module):
             
         if device_map == "auto":
             # 4. 推断多卡分配
-            device_map = build_auto_device_map(model, no_split_classes=["DecoderLayer"])# 5. 逐shard加载，模型专属的convert逻辑作为 convert_fn 传入
+            device_map = build_auto_device_map(model)# 5. 逐shard加载，模型专属的convert逻辑作为 convert_fn 传入
         else:
             # 单设备：所有参数都去同一个设备，复用同一套加载逻辑
             device_map = {"": map_location}
@@ -502,7 +524,15 @@ class LLamaForCausalLM(nn.Module):
 
     @classmethod
     def _from_local(cls, model_name_or_path: str, map_location: Optional[Union[str, torch.device]] = "cpu", device_map: Optional[Union[str, dict]] = None):
-        """从本地训练保存的模型加载，按照权重数据格式加载，不设置自定义格式"""
+        """从本地训练保存的模型加载，按照权重数据格式加载，不设置自定义格式
+        本地文件加载，必须经过cpu，逐shard加载会提高效率和降低cpu占用峰值。
+        map_location:
+            cpu: 将本地权重全部加载到cpu
+            cuda:0: 将本地权重先全部加载到cpu，然后传输到cuda:0，传输方式同device_map
+        device_map:
+            auto: 根据多卡自动计算map映射，然后逐shard 先加载到cpu，然后根据map传输到指定的GPU设备上
+            传递一个字典：按照字典的结构将指定层传递到指定GPU上
+        """
         from utils.model_loader import resolve_checkpoint_files
 
         # 1. config
@@ -534,7 +564,7 @@ class LLamaForCausalLM(nn.Module):
 
         # 5. device_map
         if device_map == "auto":
-            device_map = build_auto_device_map(model, no_split_classes=["DecoderLayer"])
+            device_map = build_auto_device_map(model)
         else:
             device_map = {"": map_location}
 
@@ -551,35 +581,67 @@ class LLamaForCausalLM(nn.Module):
     ) -> "LLamaForCausalLM":
         """仅用于架构测试（不加载任何权重），支持 device_map='auto'。
         没有 checkpoint 可以参考 dtype
+        需要设置 dtype
+        因为没有本地权重加载，所以可以直接初始化到指定GPU设备上。
         Args:
             cfg: 模型配置
             map_location: 单设备模式下的目标设备，默认 "cpu"
-            device_map: "auto" 表示多卡自动分配，否则走单设备路径
+            device_map: "auto" 表示多卡自动分配，否则走单设备路径，注意这里不经过CPU
         """
         torch.set_default_dtype(torch.bfloat16)
         try:
             if device_map == "auto":
                 with init_empty_weights():
                     model = cls(cfg)
-                resolved_map = build_auto_device_map(model, no_split_classes=["DecoderLayer"])
-                # 将 meta tensor 就地实例化到目标设备（值随机，仅验证架构维度）
-                for mod_name, mod in model.named_modules():
-                    tgt = resolved_map.get(mod_name, resolved_map.get("", "cpu"))
-                    for param_name, p in mod.named_parameters(recurse=False):
-                        if p.is_meta:
-                            mod._parameters[param_name] = nn.Parameter(
-                                torch.empty(p.shape, dtype=p.dtype, device=tgt),
-                                requires_grad=p.requires_grad,
-                            )
-                    for buf_name, b in mod.named_buffers(recurse=False):
-                        if b.is_meta:
-                            mod._buffers[buf_name] = torch.empty(b.shape, dtype=b.dtype, device=tgt)
+                resolved_map = build_auto_device_map(model)
+
+                # 实例化 meta tensor、安装 accelerate hooks，逻辑统一在 materialize_meta_model
+                materialize_meta_model(model, resolved_map)
             else:
                 with torch.device(map_location or "cpu"):
                     model = cls(cfg)
         finally:
             torch.set_default_dtype(torch.float32)
         return model
+
+    @torch.no_grad()
+    def _stream_generate(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int = 50,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+        do_sample: bool = True,
+    ) -> Generator[int, None, None]:
+        pad_token_id = pad_token_id or self.cfg.pad_token_id
+        eos_token_id = eos_token_id or self.cfg.eos_token_id
+
+        idx = input_ids
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -self.cfg.max_position_embeddings:]
+            logits = self(idx_cond)
+            logits = logits[:, -1, :].float()
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
+
+            if top_k is not None and do_sample:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = float("-inf")
+
+            if temperature == 0.0 or not do_sample:
+                _, idx_next = torch.topk(logits, k=1, dim=-1)
+            else:
+                logits = logits / temperature
+                probs = nn.functional.softmax(logits, dim=-1)
+                idx_next = torch.multinomial(probs, num_samples=1)
+
+            idx = torch.cat((idx, idx_next.to(idx.device)), dim=1)
+
+            yield idx_next[0].item()   # ← 每步产出一个 token id（batch=0）
+
+            if eos_token_id is not None and (idx_next == eos_token_id).all():
+                break
 
     @torch.no_grad()
     def generate(
@@ -592,7 +654,17 @@ class LLamaForCausalLM(nn.Module):
         pad_token_id: Optional[int] = None,
         eos_token_id: Optional[int] = None,
         do_sample: bool = True,
-    ) -> torch.Tensor:
+        stream: bool = False,
+    ) -> Union[torch.Tensor, Generator[int, None, None]]:
+        
+        # 流式输出
+        if stream:
+            return self._stream_generate(
+                input_ids, max_new_tokens, temperature, top_k,
+                pad_token_id, eos_token_id, do_sample
+            )
+        
+        # 非流式输出
         pad_token_id = pad_token_id or self.cfg.pad_token_id
         eos_token_id = eos_token_id or self.cfg.eos_token_id
 
@@ -632,33 +704,37 @@ if __name__ == "__main__":
     print("llama model architecture")
     # 模型初始化测试
     """
-    from model.llama.config import LLamaConfig
-    from config import SOURCE_DIR, OUT_DIR
-    from tokenizers import Tokenizer
-    load_pretrained_mode = LoadMode.CONTINUAL
+    load_pretrained_mode = LoadMode.PRETRAINED
+    model_name = ModelName.LLAMA3_8B.value
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/llama/tiny_llama/tokenizer.json")
-    tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/llama/llama-2-7b/tokenizer.json")
-    # tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/llama/llama-3-8b/tokenizer.json")
-    # cfg = LLamaConfig.tiny_llama()
-    # cfg = LLamaConfig.llama2_7b()
-    cfg = LLamaConfig.llama3_8b()
+    tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/llama/{model_name}/tokenizer.json")
+    cfg = MODEL_CONFIGS[model_name]
     torch.manual_seed(123)
 
     """
     # 加载权重测试
     """
     if load_pretrained_mode == LoadMode.PRETRAINED:
-        # model = LLamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/tiny_llama", source="hf", map_location=device)
-        # model = LLamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/llama-2-7b", source="hf", map_location=device)
-        model = LLamaForCausalLM.from_pretrained(f"{SOURCE_DIR}/hf/llama/llama-3-8b", source="hf", device_map="auto")
+        # 磁盘读取权重 → CPU内存 → GPU↑ 这一步无法绕过，文件必须先经过CPU内存
+        with log_stage(logger, f"加载 {model_name} 权重! {load_pretrained_mode}"):
+            model = LLamaForCausalLM.from_pretrained(
+                f"{SOURCE_DIR}/hf/llama/{model_name}",
+                source="hf", 
+                device_map="auto"
+            )
     elif load_pretrained_mode == LoadMode.CONTINUAL:
-        # model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_tiny_llama", source="local", map_location=device)
-        # model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_llama2_7b", source="local", map_location=device)
-        model = LLamaForCausalLM.from_pretrained(f"{OUT_DIR}/train_simple_20260730_llama2_7b", source="local", device_map="auto")
+        # 磁盘读取权重 → CPU内存 → GPU↑ 这一步无法绕过，文件必须先经过CPU内存
+        with log_stage(logger, f"加载 {model_name} 权重! {load_pretrained_mode}"):
+            model = LLamaForCausalLM.from_pretrained(
+                f"{OUT_DIR}/train_simple_20260730_{model_name}",
+                source="local", 
+                device_map="auto"
+            ) 
     else:
         # 仅测试模型架构（不加载权重），与 PRETRAINED/CONTINUAL 同步支持 device_map="auto"
-        model = LLamaForCausalLM.from_empty(cfg, device_map="auto")
+        with log_stage(logger, f"加载 {model_name} 权重! {load_pretrained_mode}"):
+            model = LLamaForCausalLM.from_empty(cfg, device_map="auto")
     
     """
     # 前向测试
@@ -679,9 +755,20 @@ if __name__ == "__main__":
 
     
     """
-    # 生成测试
+    # 生成测试-非流式
     """
     model.eval()
     prompt = torch.tensor(tokenizer.encode("Hello, I am").ids).unsqueeze(0).to(device) # (3,) -> (1, 3)
     out = model.generate(prompt, max_new_tokens=250, top_k=50, temperature=0.8) # (1, 3) -> (1, 13)
     print(f"\nGenerated: {tokenizer.decode(out[0].tolist())}") # (1, 13) -> (13,) -> list -> str
+
+
+    """
+    # 生成测试-流式
+    prompt = torch.tensor(tokenizer.encode("Hello, I am").ids).unsqueeze(0).to(device) # (3,) -> (1, 3)
+    model.eval()
+    for token_id in model.generate(prompt, max_new_tokens=250, top_k=50, temperature=0.8, stream=True):
+        token_str = tokenizer.decode([token_id])
+        print(token_str, end="", flush=True)
+    print()  # 最后换行
+    """

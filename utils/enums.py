@@ -18,3 +18,8 @@ class LoadMode(str, Enum):
 class ModelType(str, Enum):
     CUSTOM = "custom"            # 自定义类加载模型
     TRANSFORMERS = "transformers" # Transformers加载模型
+    
+class ModelName(str, Enum):
+    TINY_LLAMA = "tiny_llama"
+    LLAMA2_7B = "llama-2-7b"
+    LLAMA3_8B = "llama-3-8b"
