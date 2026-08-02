@@ -49,14 +49,14 @@ if __name__ == "__main__":
         level=logging.INFO,
     )
     # cpu初始化模型权重参数，由accelerate prepare自动分配显存
-    batch_size = 1
+    batch_size = 2
     lr=5e-5
     weight_decay=0.1
     
     # 加载模式
-    load_pretrained_mode = LoadMode.SCRATCH 
+    load_pretrained_mode = LoadMode.PRETRAINED 
     model_type = ModelType.CUSTOM
-    model_name = ModelName.LLAMA2_7B.value
+    model_name = ModelName.LLAMA3_8B.value
     
     # tokenizer = Tokenizer.from_pretrained("NousResearch/Llama-2-7b-hf")
     tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/llama/{model_name}/tokenizer.json")
@@ -157,9 +157,14 @@ if __name__ == "__main__":
     
     
     # 初始化优化器
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # 使用 8-bit Adam：optimizer states 从 fp32 block-wise 动态量化存储
+    # 实际 update 计算仍为 fp32，收敛曲线与标准 AdamW 基本一致
+    # 显存：optimizer fp32 96GB → 8-bit ~16GB，每卡从 16GB 降至 ~2.7GB
+    import bitsandbytes as bnb
+    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=lr, weight_decay=weight_decay)
     # 可以在这里设置梯度检查点，梯度检查点节省的显存大小和batch, 
     # max_position_embeddings有直接关系。
+    model.gradient_checkpointing_enable()
     # Accelerate 接管设备管理
     model, optimizer, train_loader, val_loader = accelerator.prepare(
         model, optimizer, train_loader, val_loader

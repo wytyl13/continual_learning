@@ -46,12 +46,12 @@ if __name__ == "__main__":
     print(device)
     # 模式选择
     load_pretrained_mode = LoadMode.PRETRAINED
-    model_type = ModelType.TRANSFORMERS
+    model_type = ModelType.CUSTOM
     model_name = ModelName.LLAMA3_8B.value
     
     # 随机初始化的模型困惑度极高，在 bootstrap 迭代中可能导致 float64 溢出
     bootstrap_iters = 0 
-    tokenizer = Tokenizer.from_pretrained("NousResearch/Llama-2-7b-hf")
+    # tokenizer = Tokenizer.from_pretrained("NousResearch/Llama-2-7b-hf")
     tokenizer = Tokenizer.from_file(f"{SOURCE_DIR}/hf/llama/{model_name}/tokenizer.json")
     
     llama_cfg: LLamaConfig = MODEL_CONFIGS[model_name] 
@@ -59,37 +59,91 @@ if __name__ == "__main__":
         llama_cfg = LlamaConfig(**llama_cfg.to_transformers_dict())
     
     # 3. 加载权重 (与训练脚本保持一致)
+    # 自动判断：单卡装得下 → data parallelism，否则 → pipeline parallelism
+    def should_use_data_parallel(model_config, dtype=torch.bfloat16):
+        """判断是否使用 data parallelism"""
+        if torch.cuda.device_count() < 2:
+            return False
+        # 估算模型大小（参数量 × 每参数字节数）
+        param_count = getattr(model_config, 'num_parameters', None)
+        if param_count is None:
+            # 粗略估算：vocab_size * hidden + n_layers * (hidden^2 * 12)
+            vocab = model_config.vocab_size
+            hidden = model_config.hidden_size
+            layers = model_config.num_hidden_layers
+            param_count = vocab * hidden + layers * (hidden * hidden * 12)
+
+        bytes_per_param = 2 if dtype == torch.bfloat16 else 4
+        model_size_gb = param_count * bytes_per_param / (1024 ** 3)
+        single_gpu_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+
+        # 单卡能装下（留2GB余量）→ data parallel
+        fits_on_single = model_size_gb + 2 < single_gpu_gb
+        logger.info(f"模型大小: {model_size_gb:.1f}GB, 单卡显存: {single_gpu_gb:.0f}GB, "
+                   f"策略: {'Data Parallelism' if fits_on_single else 'Pipeline Parallelism'}")
+        return fits_on_single
+
+    use_data_parallel = should_use_data_parallel(llama_cfg)
+
     if load_pretrained_mode == LoadMode.PRETRAINED:
         # 本地权重加载，肯定经过cpu传输到gpu
-        bootstrap_iters = 100
+        # bootstrap_iters = 100
+        bootstrap_iters = 0
         tokenizer = Tokenizer.from_file(
             f"{SOURCE_DIR}/hf/llama/{model_name}/tokenizer.json"
         )
         if model_type == ModelType.CUSTOM:
-            # 直接调用from_pre_pretrianed，自动计算device_map
-            with log_stage(logger, f"加载 {model_name} 权重! {load_pretrained_mode}, {model_type}"):
-                model = LLamaForCausalLM.from_pretrained(
-                    f"{SOURCE_DIR}/hf/llama/{model_name}", 
-                    source="hf",
-                    device_map="auto"
-                )
+            if use_data_parallel:
+                # Data parallelism：每张卡加载一份完整模型
+                with log_stage(logger, f"加载 {model_name} 权重 (Data Parallelism)! {load_pretrained_mode}, {model_type}"):
+                    models = []
+                    for gpu_id in range(torch.cuda.device_count()):
+                        m = LLamaForCausalLM.from_pretrained(
+                            f"{SOURCE_DIR}/hf/llama/{model_name}",
+                            source="hf",
+                            device_map=f"cuda:{gpu_id}"
+                        )
+                        models.append(m)
+                    model = models  # 传递模型列表
+                device = torch.device("cuda:0")
+            else:
+                # Pipeline parallelism：单个模型，可能跨多卡
+                with log_stage(logger, f"加载 {model_name} 权重 (Pipeline Parallelism)! {load_pretrained_mode}, {model_type}"):
+                    model = LLamaForCausalLM.from_pretrained(
+                        f"{SOURCE_DIR}/hf/llama/{model_name}",
+                        source="hf",
+                        device_map="auto"
+                    )
+                device = next(model.parameters()).device
         elif model_type == ModelType.TRANSFORMERS:
-            # 先自行计算device_map，from_pretrained 传入 device_map 时，transformers 内部会自动调用
-            # 也可以直接传递device_map="auto"
-            # 无参初始化 -> 设计 device_map -> 直接传递device_map到transformers库初始化
-            with init_empty_weights():
-                _empty = LlamaForCausalLM(llama_cfg)
-            device_map = build_auto_device_map(_empty)
-            with log_stage(logger, f"加载 {model_name} 权重! {load_pretrained_mode}, {model_type}"):
-                model = LlamaForCausalLM.from_pretrained(
-                    f"{SOURCE_DIR}/hf/llama/{model_name}",
-                    torch_dtype=torch.bfloat16,
-                    device_map=device_map
-                )
-            # from_pretrained 的 device_map 已安装 hooks，输入设备固定为 cuda:0
-            device = next(model.parameters()).device
+            if use_data_parallel:
+                # Data parallelism：每张卡加载一份完整模型
+                with log_stage(logger, f"加载 {model_name} 权重 (Data Parallelism)! {load_pretrained_mode}, {model_type}"):
+                    models = []
+                    for gpu_id in range(torch.cuda.device_count()):
+                        m = LlamaForCausalLM.from_pretrained(
+                            f"{SOURCE_DIR}/hf/llama/{model_name}",
+                            torch_dtype=torch.bfloat16,
+                            device_map=f"cuda:{gpu_id}"
+                        )
+                        models.append(m)
+                    model = models  # 传递模型列表
+                device = torch.device("cuda:0")
+            else:
+                # Pipeline parallelism：单个模型拆分到多卡
+                with init_empty_weights():
+                    _empty = LlamaForCausalLM(llama_cfg)
+                device_map = build_auto_device_map(_empty)
+                with log_stage(logger, f"加载 {model_name} 权重 (Pipeline Parallelism)! {load_pretrained_mode}, {model_type}"):
+                    model = LlamaForCausalLM.from_pretrained(
+                        f"{SOURCE_DIR}/hf/llama/{model_name}",
+                        torch_dtype=torch.bfloat16,
+                        device_map=device_map
+                    )
+                device = next(model.parameters()).device
     elif load_pretrained_mode == LoadMode.CONTINUAL:
-        bootstrap_iters = 100
+        # bootstrap_iters = 100
+        bootstrap_iters = 0
         tokenizer = Tokenizer.from_file(
             f"{OUT_DIR}/train_simple_20260730_{model_name}/tokenizer.json"
         )
@@ -141,22 +195,29 @@ if __name__ == "__main__":
     # 4. 初始化评估 Wrapper 
     # (确保统一传入 tokenizer，保持自定义评估和 Transformers 评估的一致性)
     lm = GPT2LM(
-        model=model, 
-        device=device, 
-        context_length=llama_cfg.max_position_embeddings, 
+        model=model,
+        device=device,
+        context_length=llama_cfg.max_position_embeddings,
         tokenizer=tokenizer,
         max_gen_toks=1024,
         vocab_size=llama_cfg.vocab_size,
-        eot_token_id=llama_cfg.eos_token_id
+        eot_token_id=llama_cfg.eos_token_id,
+        batch_size=2,   # 真正的 GPU forward pass batch_size，根据显存调整
     )
-
+    import time
+    start = time.time()
     # 5. 执行评估
     results = lm_eval.simple_evaluate(
         model=lm,
         # tasks=["wikitext"],
-        tasks=["lambada_openai", "wikitext"],
-        batch_size=32,
-        bootstrap_iters=bootstrap_iters
+        tasks=["nq_open"],
+        # tasks=["lambada_openai"],
+        # tasks=["lambada_openai", "wikitext"],
+        # tasks=["lambada_openai", "wikitext", "hellaswag", "arc_easy"],
+        batch_size=2,
+        bootstrap_iters=bootstrap_iters,
+        # limit=500,
     )
-    
+    cost = time.time() - start
     print(results["results"])
+    print(cost)

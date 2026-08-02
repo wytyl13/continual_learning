@@ -10,6 +10,7 @@ llama model architecture.
 """
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from typing import Tuple, Optional, Union, Generator
 import math
 import inspect
@@ -28,7 +29,8 @@ from utils.model_loader import (
     resolve_checkpoint_files, 
     build_auto_device_map, 
     fast_load_weights, 
-    materialize_meta_model
+    materialize_meta_model,
+    auto_device_map
 )
 
 from utils.logger import get_logger, log_stage
@@ -180,15 +182,20 @@ def apply_rotary_emb(
     # what is correspond to the transformer position embedding: PE(pos, 2i), PE(po, 2i+1)
     # q_r means real [0, 2, 4, ..., hidden_size // 2], q_i means imaginary [1, 3, 5, ..., hidden_size // 2 + 1].
     
+    # q.float() 如果转换为float32会占用大量显存
     # shape(batch, max_position_embeddings, num_attention_heads, hidden_size // 2), shape(batch, max_position_embeddings, num_attention_heads, hidden_size // 2)
-    q_r, q_i = q.float().reshape(q.shape[:-1] + (-1, 2)).unbind(-1) 
+    # q_r, q_i = q.float().reshape(q.shape[:-1] + (-1, 2)).unbind(-1) 
+    q_r, q_i = q.reshape(q.shape[:-1] + (-1, 2)).unbind(-1) 
 
     # shape(batch, max_position_embeddings, num_attention_heads, hidden_size // 2), shape(batch, max_position_embeddings, num_attention_heads, hidden_size // 2)
-    k_r, k_i = k.float().reshape(k.shape[:-1] + (-1, 2)).unbind(-1)
+    # k_r, k_i = k.float().reshape(k.shape[:-1] + (-1, 2)).unbind(-1)
+    k_r, k_i = k.reshape(k.shape[:-1] + (-1, 2)).unbind(-1)
     
     # reshape freqs_cos and freqs_sin for broadcasting.
-    freqs_cos = reshape_for_broadcast(freqs_cos, q_r) # shape(1, max_position_embeddings, 1, hidden_size // 2)
-    freqs_sin = reshape_for_broadcast(freqs_sin, q_r) # shape(1, max_position_embeddings, 1, hidden_size // 2)
+    # freqs_cos = reshape_for_broadcast(freqs_cos, q_r) # shape(1, max_position_embeddings, 1, hidden_size // 2)
+    freqs_cos = reshape_for_broadcast(freqs_cos, q_r).to(q.dtype)
+    # freqs_sin = reshape_for_broadcast(freqs_sin, q_r) # shape(1, max_position_embeddings, 1, hidden_size // 2)
+    freqs_sin = reshape_for_broadcast(freqs_sin, q_r).to(q.dtype)
 
     # The final rotary reuslt for query and key.
     # (a_q+i*b_q)*eⁱᵐᶿ = (a_q*cosmθ - b_q*sinmθ) + i*(a_q*sinmθ + b_q*cosmθ), a_q is real part, b_q is imaginary.
@@ -260,20 +267,32 @@ class Attention(nn.Module):
         self.dropout = nn.Dropout(cfg.attn_pdrop)
         
         self.flash = hasattr(nn.functional, 'scaled_dot_product_attention')
+        """
+        # (1, 1, max_position_embeddings, max_position_embeddings), fill with -inf
+        mask = torch.full((1, 1, cfg.max_position_embeddings, cfg.max_position_embeddings), float("-inf"))
+        # 把掩码矩阵的左下角及对角线（diagnoal=1）全部置为0
+        mask = torch.triu(mask, diagonal=1)
+        self.register_buffer("mask", mask, persistent=False)
+        """
+        mask = torch.ones(cfg.max_position_embeddings, cfg.max_position_embeddings, dtype=torch.bool).triu(1)
+        self.register_buffer("mask", mask[None, None], persistent=False)
+        
         if not self.flash:
             logger.warning(f"using slow attention. Flash Attention requires Pytorch >= 2.0")
-            # (1, 1, max_position_embeddings, max_position_embeddings), fill with -inf
-            mask = torch.full((1, 1, cfg.max_position_embeddings, cfg.max_position_embeddings), float("-inf"))
-            # 把掩码矩阵的左下角及对角线（diagnoal=1）全部置为0
-            mask = torch.triu(mask, diagonal=1)
-            self.register_buffer("mask", mask, persistent=False)
             
     def forward(
         self, 
         x: torch.Tensor,
         freqs_cos: torch.Tensor,
-        freqs_sin: torch.Tensor
+        freqs_sin: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None # shape(batch, seq_len)
     ) -> torch.Tensor:
+        """
+        attention_mask is applied for the inference left padding operation
+        what ensure the different seq_len of input x tensor. because the 
+        matrix operation must be same seq_len.
+        """
+        
         batch, max_position_embeddings, _ = x.shape
 
         # 线性投影
@@ -296,7 +315,34 @@ class Attention(nn.Module):
         
         # flash implementation
         if self.flash:
-            output = nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout.p if self.training else 0.0, is_causal=True)
+            # 判断是否真的有 padding（全1 =没有 padding，不需要 mask）
+            has_padding = attention_mask is not None and not attention_mask.all()
+
+            if has_padding:
+                # 有真实 padding，才构造 combined mask
+                causal = self.mask[:, :, :max_position_embeddings, :max_position_embeddings]
+                causal = torch.zeros_like(causal, dtype=q.dtype).masked_fill_(causal, float("-inf"))
+                # 同时修掉 pad 的 float32 问题：用 q.dtype 代替 .float()
+                pad = torch.zeros(
+                    (attention_mask.shape[0], 1, 1, attention_mask.shape[1]),
+                    dtype=q.dtype, device=q.device
+                )
+                pad.masked_fill_((attention_mask == 0).unsqueeze(1).unsqueeze(2), float("-inf"))
+                combined = causal + pad
+                output = nn.functional.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=combined,
+                    dropout_p=self.dropout.p if self.training else 0.0,
+                    is_causal=False
+                )
+            else:
+                # 无 padding（或无 mask）→ Flash Attention 最优路径，不实例化注意力矩阵
+                output = nn.functional.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=None,
+                    dropout_p=self.dropout.p if self.training else 0.0,
+                    is_causal=True
+                )
         else:
             # manual implementation.
             # q shape(batch, num_key_value_heads * n_rep, max_position_embeddings, head_dim) @
@@ -304,8 +350,22 @@ class Attention(nn.Module):
             # output shape(batch, num_key_value_heads * n_rep, max_position_embeddings, max_position_embeddings)
             scores = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
             assert hasattr(self, 'mask')
+            
             # shape(batch, num_key_value_heads, max_position_embeddings, max_position_embeddings)
-            scores = scores + self.mask[:, :, :max_position_embeddings, :max_position_embeddings]
+            causal = self.mask[:, :, :max_position_embeddings, :max_position_embeddings]
+            scores = scores.masked_fill(causal, float("-inf"))
+
+            # apply attention_mask
+            if attention_mask is not None:
+                # reshape from (batch, seq_len) to (batch, 1, 1, seq_len)
+                # and make the value in mask: 0 -> -inf, 1 -> 0
+                mask_value = torch.zeros(
+                    (attention_mask.shape[0], 1, 1, attention_mask.shape[1]),
+                    dtype=q.dtype, device=q.device
+                )
+                mask_value.masked_fill_((attention_mask == 0).unsqueeze(1).unsqueeze(2), float("-inf"))
+                scores = scores + mask_value
+
             scores = nn.functional.softmax(scores.float(), dim=-1).type_as(q)
             scores = self.dropout(scores)
             
@@ -370,10 +430,16 @@ class DecoderLayer(nn.Module):
         self, 
         x: torch.Tensor, 
         freqs_cos: torch.Tensor, 
-        freqs_sin: torch.Tensor
+        freqs_sin: torch.Tensor,
+        attention_mask: Optional[torch.tensor] = None
     ) -> torch.Tensor:
         # attention layer. layer_norm -> self_attn -> dropout -> short connect.
-        x = x + self.dropout(self.self_attn(self.input_layernorm(x), freqs_cos, freqs_sin))
+        x = x + self.dropout(self.self_attn(
+            self.input_layernorm(x), 
+            freqs_cos, 
+            freqs_sin, 
+            attention_mask
+        ))
         
         # feed forward layer. post_attn_layernorm -> SwiGLU -> dropout -> short connect.
         return x + self.dropout(self.mlp(self.post_attention_layernorm(x)))
@@ -394,15 +460,22 @@ class LLamaModel(nn.Module):
 
         # RoPE，注册为buffer，不参与梯度
         head_dim = cfg.hidden_size // cfg.num_attention_heads
-        freqs_cos, freqs_sin = precompute_freqs_cis(head_dim, cfg.max_position_embeddings)
+        freqs_cos, freqs_sin = precompute_freqs_cis(head_dim, cfg.max_position_embeddings, cfg.rope_theta)
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
+        self.gradient_checkpointing = False
 
-    def forward(self, idx: torch.Tensor) -> torch.Tensor: 
+
+    def forward(
+        self, 
+        idx: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor: 
         """
         Args:
             idx: (batch, seq_len) token id 序列
+            attention_mask: (batch, seq_len) left padding mask applied for the inference.
         Returns:
             logits: (batch, seq_len, vocab_size)
         """
@@ -415,9 +488,18 @@ class LLamaModel(nn.Module):
         freqs_cos = self.freqs_cos[:max_position_embeddings]
         freqs_sin = self.freqs_sin[:max_position_embeddings]
         for layer in self.layers:
-            # x = layer(x, freqs_cos, freqs_sin)
-            layer_device = next(layer.parameters()).device
-            x = layer(x.to(layer_device), freqs_cos.to(layer_device), freqs_sin.to(layer_device))
+            if self.gradient_checkpointing and self.training:
+                # 重计算激活值换显存，use_reentrant=False 与 ZeRO-3 兼容更好
+                x = checkpoint(layer, x, freqs_cos, freqs_sin, use_reentrant=False)
+            else:
+                layer_device = next(layer.parameters()).device
+                attn_mask_on_device = attention_mask.to(layer_device) if attention_mask is not None else None
+                x = layer(
+                    x.to(layer_device), 
+                    freqs_cos.to(layer_device), 
+                    freqs_sin.to(layer_device),
+                    attn_mask_on_device
+                )
         x = x.to(next(self.norm.parameters()).device)
         x = self.norm(x)
         return x
@@ -449,9 +531,21 @@ class LLamaForCausalLM(nn.Module):
         if self.cfg.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        """启用梯度检查点：重计算激活值换显存，与 ZeRO-3 兼容。"""
+        self.model.gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self):
+        """禁用梯度检查点。"""
+        self.model.gradient_checkpointing = False
+
+    def forward(
+        self, 
+        idx: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         # shape(batch, max_position_embeddings)
-        hidden_state = self.model(idx)
+        hidden_state = self.model(idx, attention_mask)
         # batch, max_position_embedding, vocab_size
         # NOTE: do NOT manually .to() here — when device_map="auto" is used,
         # accelerate's AlignDevicesHook.pre_forward already moves inputs to the
@@ -505,13 +599,9 @@ class LLamaForCausalLM(nn.Module):
 
         with init_empty_weights():
             model = cls(config)
-            
-        if device_map == "auto":
-            # 4. 推断多卡分配
-            device_map = build_auto_device_map(model)# 5. 逐shard加载，模型专属的convert逻辑作为 convert_fn 传入
-        else:
-            # 单设备：所有参数都去同一个设备，复用同一套加载逻辑
-            device_map = {"": map_location}
+        
+        device_map = auto_device_map(model, device_map, map_location)
+        
         def convert_fn(shard):
             return convert_safetensors_to_custom(
                 shard, config.num_hidden_layers,
@@ -533,8 +623,6 @@ class LLamaForCausalLM(nn.Module):
             auto: 根据多卡自动计算map映射，然后逐shard 先加载到cpu，然后根据map传输到指定的GPU设备上
             传递一个字典：按照字典的结构将指定层传递到指定GPU上
         """
-        from utils.model_loader import resolve_checkpoint_files
-
         # 1. config
         config_file = os.path.join(model_name_or_path, "config.json")
         if not os.path.exists(config_file):
@@ -563,11 +651,8 @@ class LLamaForCausalLM(nn.Module):
             model = cls(config)
 
         # 5. device_map
-        if device_map == "auto":
-            device_map = build_auto_device_map(model)
-        else:
-            device_map = {"": map_location}
-
+        device_map = auto_device_map(model, device_map, map_location)
+        
         # 6. 加载（支持单文件和分片）
         fast_load_weights(model, shard_files, use_safetensors, device_map, convert_fn)
         return model
@@ -653,7 +738,7 @@ class LLamaForCausalLM(nn.Module):
         top_k: Optional[int] = None,
         pad_token_id: Optional[int] = None,
         eos_token_id: Optional[int] = None,
-        do_sample: bool = True,
+        do_sample: bool = True, # false: greedy decoding
         stream: bool = False,
     ) -> Union[torch.Tensor, Generator[int, None, None]]:
         
@@ -671,7 +756,11 @@ class LLamaForCausalLM(nn.Module):
         idx = input_ids
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.cfg.max_position_embeddings:]
-            logits = self(idx_cond)
+            
+            
+            attn_cond = attention_mask[:, -self.cfg.max_position_embeddings:] if attention_mask is not None else None
+            
+            logits = self(idx_cond, attention_mask=attn_cond)
             logits = logits[:, -1, :]
 
             # Upcast and sanitize before any masking — bfloat16 overflow can

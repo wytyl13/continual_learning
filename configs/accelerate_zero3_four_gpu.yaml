@@ -1,9 +1,9 @@
-# 用法: PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" accelerate launch --config_file configs/accelerate_zero3_five_gpu.yaml -m training.train_llama
+# 用法: PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" accelerate launch --config_file configs/accelerate_zero3_four_gpu.yaml -m training.train_llama
 compute_environment: LOCAL_MACHINE
 distributed_type: DEEPSPEED
 mixed_precision: bf16
 num_machines: 1
-num_processes: 5
+num_processes: 4              # 修改为实际 GPU 数量
 use_cpu: false
 deepspeed_config:
   gradient_accumulation_steps: 3

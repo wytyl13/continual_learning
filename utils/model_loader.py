@@ -8,8 +8,47 @@
 
 import os, json
 import torch
-from typing import Callable, Optional
+from typing import (
+    Callable, 
+    Optional, 
+    Dict,
+    Union
+)
+
 from safetensors.torch import load_file
+import torch.nn as nn
+
+
+
+def auto_device_map(
+    model: nn.Module, 
+    device_map: Optional[Union[Dict, str]] = None, 
+    map_location: str = None
+) -> dict:
+    """
+    统一处理 device_map 参数
+    
+    Args:
+        model: 模型实例
+        device_map: "auto" | "cuda:0" | {"layer.0": "cuda:0", ...} | None
+        map_location: 默认设备
+    
+    Returns:
+        dict: 统一格式的 device_map {"": device} 或 {"layer.0": "cuda:0", ...}
+    """
+    if device_map == "auto":
+        # 多卡自动分配
+        return build_auto_device_map(model)
+    elif device_map is not None:
+        # device_map 是字符串（"cuda:0"）或字典
+        if isinstance(device_map, str):
+            return {"": device_map}
+        else:
+            # 已经是字典，直接用
+            return device_map
+    else:
+        # device_map 是 None，用 map_location
+        return {"": map_location}
 
 
 def resolve_checkpoint_files(model_dir: str) -> tuple[list[str], bool]:
@@ -45,9 +84,12 @@ def build_auto_device_map(
     """
     均衡分配多卡device_map，行为与HF from_pretrained(device_map="auto")一致。
     可复用于任何模型，只需传入 no_split_classes（不可跨卡切分的层类名）。
+
+    注意：get_balanced_memory 估算保守，会把最后1-2层溢出到CPU/disk。
+    对于纯推理场景（无梯度/优化器），直接按实际显存的90%计算max_memory，
+    并将CPU设为0，可避免溢出。若GPU真的不够，infer_auto_device_map会明确报错。
     """
     from accelerate import infer_auto_device_map
-    from accelerate.utils import get_balanced_memory
 
     if no_split_classes is None:
         no_split_classes = getattr(model, "_no_split_modules", [])
@@ -56,13 +98,25 @@ def build_auto_device_map(
     if hasattr(model, 'tie_weights'):
         model.tie_weights()
 
-    max_memory = get_balanced_memory(
-        model, no_split_module_classes=no_split_classes,
-        dtype=dtype, low_zero=False,
-    )
+    # 每张卡留 10% 给激活值/KV cache，CPU/disk 配额设为 0。
+    # 替代方案：如需让 get_balanced_memory 自动估算 GPU 配额，可改用以下写法，
+    # 但它估算偏保守，在显存勉强够用时容易把最后1-2层错误地溢出到 CPU/disk：
+    #
+    #   from accelerate.utils import get_balanced_memory
+    #   max_memory = get_balanced_memory(
+    #       model, no_split_module_classes=no_split_classes,
+    #       dtype=dtype, low_zero=False,
+    #   )
+    #
+    n_gpus = torch.cuda.device_count()
+    max_memory = {
+        i: int(torch.cuda.get_device_properties(i).total_memory * 0.90)
+        for i in range(n_gpus)
+    }
+    max_memory["cpu"] = 0
+
     # infer_auto_device_map 输出的是路径名 → 设备 的字典
     # device_map = {"model.layers.0": "cuda:0", ...}
-    # no_split_module_classes 只是通过类名称去找，最终存储的device_map还是路径名
     return infer_auto_device_map(
         model, max_memory=max_memory,
         no_split_module_classes=no_split_classes,

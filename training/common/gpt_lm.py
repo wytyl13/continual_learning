@@ -11,6 +11,9 @@ from tokenizers import Tokenizer
 from lm_eval.api.model import LM
 import torch
 import torch.nn.functional as F
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class GPT2LM(LM):
@@ -18,41 +21,56 @@ class GPT2LM(LM):
         self,
         model,
         device,
-        tokenizer=None,                 # 新增：可选的 tokenizer 参数（支持 transformers.GPT2Tokenizer）
+        tokenizer=None,
         model_name: str = "gpt2",
         context_length: int = 1024,
         vocab_size: int = 50257,
         eot_token_id: int = None,
         max_gen_toks: int = 200,
-        batch_size: int = 2
+        batch_size: int = 2,
     ):
         """
-        LM 包装器，支持自定义模型和 transformers 模型
+        LM 包装器，支持自定义模型和 transformers 模型，自动适配 data/pipeline parallelism。
 
         Args:
-            model: 模型实例（可以是自定义的 GPTModel 或 transformers 的 GPT2LMHeadModel）
-            device: 设备
+            model: 单个模型或模型列表
+                   - 单个模型 → pipeline parallelism（模型可能跨多卡，串行推理）
+                   - 模型列表 → data parallelism（每个模型占一张卡，并行推理）
+            device: 主设备（单模型时使用；多模型时忽略，各模型用自己的设备）
             tokenizer: tokenizer 实例（必须提供）
             model_name: 模型名称（保留参数，未使用）
             context_length: 上下文长度
             vocab_size: 词表大小
             max_gen_toks: 最大生成 token 数
-            batch_size: 批次大小
+            batch_size: 批次大小（data parallel 时，每个模型的实际 batch = batch_size // len(models)）
 
         使用示例：
-            from tokenizers import Tokenizer
-            model = GPTForCausalLM.from_pretrained(...)
-            tokenizer = Tokenizer.from_pretrained("gpt2")
+            # Pipeline parallelism (单个模型，可能跨多卡)
+            model = LlamaForCausalLM.from_pretrained(..., device_map="auto")
             lm = GPT2LM(model=model, device=device, tokenizer=tokenizer)
+
+            # Data parallelism (多个模型，各占一卡)
+            model_0 = LlamaForCausalLM.from_pretrained(..., device_map="cuda:0")
+            model_1 = LlamaForCausalLM.from_pretrained(..., device_map="cuda:1")
+            lm = GPT2LM(model=[model_0, model_1], device=None, tokenizer=tokenizer)
         """
         super().__init__()
-        # 如果模型已经通过 accelerate dispatch_model / device_map="auto" 分配到多卡，
-        # 不能再调用 .to(device)，否则会破坏 hook 的设备映射，导致 device 混乱。
-        _has_accelerate_hooks = any(hasattr(m, '_hf_hook') for m in model.modules())
-        if not _has_accelerate_hooks:
-            model = model.to(device)
-        self.model = model.eval()
-        self._device = device
+
+        # 支持单个模型或模型列表
+        if isinstance(model, list):
+            self.models = [m.eval() for m in model]
+            self.use_data_parallel = len(self.models) > 1
+            self._device = device if device else next(self.models[0].parameters()).device
+        else:
+            # 如果模型已经通过 accelerate dispatch_model / device_map="auto" 分配到多卡，
+            # 不能再调用 .to(device)，否则会破坏 hook 的设备映射，导致 device 混乱。
+            _has_accelerate_hooks = any(hasattr(m, '_hf_hook') for m in model.modules())
+            if not _has_accelerate_hooks:
+                model = model.to(device)
+            self.models = [model.eval()]
+            self.use_data_parallel = False
+            self._device = device
+
         self.tokenizer = Tokenizer.from_pretrained(model_name) if tokenizer is None else tokenizer
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
@@ -61,8 +79,16 @@ class GPT2LM(LM):
         self.vocab_size = vocab_size
         self._eot_token_id = eot_token_id if eot_token_id is not None else vocab_size - 1
         self._max_gen_toks = max_gen_toks
-        self._batch_size = batch_size
-    
+        # Data parallel 时每个模型的实际 batch_size 应该更小（因为同时跑多个模型）
+        # 为了保持总吞吐量不变，每个模型用 batch_size // n_models
+        self._batch_size = batch_size // len(self.models) if self.use_data_parallel else batch_size
+
+        if self.use_data_parallel:
+            logger.info(f"[GPT2LM] Data Parallelism: {len(self.models)} 模型, "
+                       f"每模型 batch_size={self._batch_size}")
+        else:
+            logger.info(f"[GPT2LM] Pipeline Parallelism: 1 模型, batch_size={self._batch_size}")
+
     @property
     def eot_token_id(self):
         return self._eot_token_id
@@ -87,6 +113,108 @@ class GPT2LM(LM):
         return self.tokenizer.decode(tokens)
     
     def loglikelihood(self, requests):
+        """loglikelihood 入口：统一走真正批量前向传播"""
+        return self._loglikelihood_batched(requests)
+    
+    def loglikelihood_rolling(self, requests):
+        """loglikelihood_rolling 入口：统一走真正批量前向传播"""
+        return self._loglikelihood_rolling_batched(requests)
+
+    def _loglikelihood_batched(self, requests):
+        """
+        真正的批量推理：将多条 requests 左padding对齐后合并成 (B, L) 一次 forward pass。
+        支持 data parallelism：若有多个模型，并行处理各自的请求子集。
+
+        为什么用左padding（而不是右padding）：
+          - 续写 tokens 永远在序列末尾
+          - 左padding让所有样本的末尾对齐，logits[-cont_len-1:-1] 索引方式可以统一使用
+          - 右padding会把续写token推到中间，位置索引变复杂
+        注意：需要传入 attention_mask 来让模型忽略 padding 位置。
+        """
+        if not self.use_data_parallel:
+            # Pipeline parallelism 或单GPU：串行处理
+            return self._process_requests(requests, self.models[0], self._device)
+
+        # Data parallelism：拆分请求到多个模型，并行处理
+        import threading
+        n_models = len(self.models)
+        chunk_size = (len(requests) + n_models - 1) // n_models  # 向上取整
+        chunks = [requests[i:i+chunk_size] for i in range(0, len(requests), chunk_size)]
+
+        results_list = [None] * n_models
+        threads = []
+
+        for i, (chunk, model) in enumerate(zip(chunks, self.models)):
+            device = next(model.parameters()).device
+            t = threading.Thread(
+                target=lambda idx, reqs, m, d: results_list.__setitem__(idx, self._process_requests(reqs, m, d)),
+                args=(i, chunk, model, device)
+            )
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        # 合并结果
+        results = []
+        for r in results_list:
+            if r:
+                results.extend(r)
+        return results
+
+    def _process_requests(self, requests, model, device):
+        """处理一批请求的核心逻辑，供串行和并行两种模式复用"""
+        results = []
+        pad_id = 0
+
+        for batch_start in range(0, len(requests), self._batch_size):
+            batch_reqs = requests[batch_start : batch_start + self._batch_size]
+
+            # 1. 对每条请求做分词
+            batch_input_ids = []
+            batch_cont_ids  = []
+            for req in batch_reqs:
+                context, continuation = req.args
+                full_ids = self.tok_encode(context + continuation)
+                ctx_ids  = self.tok_encode(context)
+                cont_ids = full_ids[len(ctx_ids):]
+                input_ids = (ctx_ids + cont_ids)[-self.max_length:]
+                batch_input_ids.append(input_ids)
+                batch_cont_ids.append(cont_ids)
+
+            # 2. 左padding对齐到同一长度
+            max_len = max(len(x) for x in batch_input_ids)
+            padded       = []
+            attn_masks   = []
+            for ids in batch_input_ids:
+                pad_len = max_len - len(ids)
+                padded.append([pad_id] * pad_len + ids)
+                attn_masks.append([0] * pad_len + [1] * len(ids))
+
+            input_tensor = torch.tensor(padded,     dtype=torch.long).to(device)
+            attn_tensor  = torch.tensor(attn_masks, dtype=torch.long).to(device)
+
+            # 3. 单次 forward pass，batch_size = B
+            with torch.no_grad():
+                out = model(input_tensor, attention_mask=attn_tensor)
+                logits = out.logits if hasattr(out, 'logits') else out   # (B, L, V)
+
+            # 4. 逐样本取续写位置的 logits 并计算分数
+            for j, cont_ids in enumerate(batch_cont_ids):
+                cont_len     = len(cont_ids)
+                # 由于左padding，续写 token 对应的 logit 永远在末尾相同位置
+                cont_logits  = logits[j, -cont_len - 1 : -1, :]          # (cont_len, V)
+                cont_ids_t   = torch.tensor(cont_ids, dtype=torch.long).to(device)
+                log_probs    = F.log_softmax(cont_logits, dim=-1)
+                token_lp     = log_probs[range(cont_len), cont_ids_t]
+                total_lp     = token_lp.sum().item()
+                is_greedy    = (cont_logits.argmax(dim=-1) == cont_ids_t).all().item()
+                results.append((total_lp, bool(is_greedy)))
+
+        return results
+
+    def _loglikelihood_serial(self, requests):
         """
         给定一个上下文和一个续写，
         1、模型给这段续写打分（所有续写token的概率值之和）
@@ -178,8 +306,154 @@ class GPT2LM(LM):
             is_greedy = (cont_logits.argmax(dim=-1) == cont_ids_t).all().item()
             results.append((total_log_prob, bool(is_greedy)))
         return results
+       
+    def _loglikelihood_parallel(self, requests):
+        """并行推理（使用多个 CUDA streams）"""
+        results = [None] * len(requests)
+        
+        # 分配每个请求到不同的 stream
+        for i, req in enumerate(requests):
+            stream_idx = i % self.num_streams
+            stream = self.streams[stream_idx]
             
-    def loglikelihood_rolling(self, requests):
+            with torch.cuda.stream(stream):
+                context, continuation = req.args
+                full_text = context + continuation
+                full_ids = self.tok_encode(full_text)
+                ctx_ids = self.tok_encode(context)
+                cont_ids = full_ids[len(ctx_ids):]
+                cont_len = len(cont_ids)
+                
+                input_ids = (ctx_ids + cont_ids)[-self.max_length:]
+                input_tensor = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(self._device)
+                
+                with torch.no_grad():
+                    logits = self.model(input_tensor)
+                    if hasattr(logits, 'logits'):
+                        logits = logits.logits
+                
+                cont_logits = logits[0, -cont_len - 1:-1, :]
+                cont_ids_t = torch.tensor(cont_ids, dtype=torch.long).to(self._device)
+                log_probs = F.log_softmax(cont_logits, dim=-1)
+                token_log_probs = log_probs[range(cont_len), cont_ids_t]
+                total_log_prob = token_log_probs.sum().item()
+                is_greedy = (cont_logits.argmax(dim=-1) == cont_ids_t).all().item()
+                
+                results[i] = (total_log_prob, bool(is_greedy))
+        
+        # 同步所有 streams
+        for stream in self.streams:
+            stream.synchronize()
+        
+        return results
+            
+    def _loglikelihood_rolling_batched(self, requests):
+        """
+        真正的批量 rolling 推理：把所有文档的所有滑动窗口摊平，按 batch_size 批量做 forward pass。
+        支持 data parallelism：若有多个模型，并行处理各自的文档子集。
+
+        思路：
+          - 每篇文档的滑动窗口是顺序依赖的（total_log_prob 累加），但窗口之间彼此独立。
+          - 不同文档的窗口也彼此独立。
+          - 因此把所有（文档, 窗口）二元组摊平成一个 list，统一批量推理，最后按 doc_idx 归并。
+
+        左padding说明：
+          - 窗口内的 token 占据 padded tensor 的末尾，padding 在前。
+          - count_from（需要跳过的重叠前缀）是相对于原始 chunk 的偏移量，
+            换算到 padded tensor 的偏移 = pad_len + count_from。
+        """
+        if not self.use_data_parallel:
+            # Pipeline parallelism 或单GPU：串行处理
+            return self._process_rolling_requests(requests, self.models[0], self._device)
+
+        # Data parallelism：拆分文档到多个模型，并行处理
+        import threading
+        n_models = len(self.models)
+        chunk_size = (len(requests) + n_models - 1) // n_models
+        chunks = [requests[i:i+chunk_size] for i in range(0, len(requests), chunk_size)]
+
+        results_list = [None] * n_models
+        threads = []
+
+        for i, (chunk, model) in enumerate(zip(chunks, self.models)):
+            device = next(model.parameters()).device
+            t = threading.Thread(
+                target=lambda idx, reqs, m, d: results_list.__setitem__(idx, self._process_rolling_requests(reqs, m, d)),
+                args=(i, chunk, model, device)
+            )
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        # 合并结果
+        results = []
+        for r in results_list:
+            if r:
+                results.extend(r)
+        return results
+
+    def _process_rolling_requests(self, requests, model, device):
+        """处理 rolling 请求的核心逻辑，供串行和并行两种模式复用"""
+        # 1. 为每篇文档预计算所有滑动窗口
+        #    all_windows: list of (doc_idx, chunk_tokens, count_from)
+        all_windows = []
+        for doc_idx, req in enumerate(requests):
+            tokens    = self.tok_encode(req.args[0])
+            stride    = self.max_length // 2
+            start     = 0
+            prev_end  = 0
+            while True:
+                end        = min(start + self.max_length, len(tokens))
+                chunk      = tokens[start:end]
+                count_from = max(prev_end - start, 1)
+                all_windows.append((doc_idx, chunk, count_from))
+                prev_end = end
+                if end >= len(tokens):
+                    break
+                start += stride
+
+        # 2. 按 batch_size 批量推理所有窗口
+        doc_log_probs = [0.0] * len(requests)
+        pad_id = 0
+
+        for batch_start in range(0, len(all_windows), self._batch_size):
+            batch = all_windows[batch_start : batch_start + self._batch_size]
+
+            # 左padding对齐
+            max_len    = max(len(w[1]) for w in batch)
+            padded     = []
+            attn_masks = []
+            for _, chunk, _ in batch:
+                pad_len = max_len - len(chunk)
+                padded.append([pad_id] * pad_len + list(chunk))
+                attn_masks.append([0] * pad_len + [1] * len(chunk))
+
+            input_tensor = torch.tensor(padded,     dtype=torch.long).to(device)
+            attn_tensor  = torch.tensor(attn_masks, dtype=torch.long).to(device)
+
+            with torch.no_grad():
+                out    = model(input_tensor, attention_mask=attn_tensor)
+                logits = out.logits if hasattr(out, 'logits') else out   # (B, L, V)
+
+            for j, (doc_idx, chunk, count_from) in enumerate(batch):
+                target_tokens = chunk[count_from:]
+                if not target_tokens:
+                    continue
+                n       = len(target_tokens)
+                pad_len = max_len - len(chunk)
+                # count_from 是在原始 chunk 里的偏移，换算到 padded tensor 的偏移
+                actual_from = pad_len + count_from
+                pred_logits = logits[j, actual_from - 1 : actual_from - 1 + n, :]  # (n, V)
+                log_probs   = F.log_softmax(pred_logits, dim=-1)
+                target_t    = torch.tensor(target_tokens, dtype=torch.long).to(device)
+                token_lp    = log_probs[range(n), target_t]
+                doc_log_probs[doc_idx] += token_lp.sum().item()
+
+        return doc_log_probs
+
+    def _loglikelihood_rolling_serial(self, requests):
         """
         评估模型对整篇文章的建模能力（困惑度PPL）
         PPL回答的问题：模型预测每个词时，平均面临多少种有效选择？
@@ -242,45 +516,154 @@ class GPT2LM(LM):
             results.append(total_log_prob)
         return results
 
+    def _loglikelihood_rolling_parallel(self, requests):
+        """并行 rolling 推理"""
+        results = [None] * len(requests)
+        
+        for i, req in enumerate(requests):
+            stream_idx = i % self.num_streams
+            stream = self.streams[stream_idx]
+            
+            with torch.cuda.stream(stream):
+                string = req.args[0]
+                tokens = self.tok_encode(string)
+                stride = self.max_length // 2
+                total_log_prob = 0.0
+                prev_end = 0
+                start = 0
+                
+                while True:
+                    end = min(start + self.max_length, len(tokens))
+                    chunk = tokens[start:end]
+                    input_tensor = torch.tensor(chunk).unsqueeze(0).to(self._device)
+                    
+                    with torch.no_grad():
+                        logits = self.model(input_tensor)
+                        if hasattr(logits, 'logits'):
+                            logits = logits.logits
+                    
+                    count_from = max(prev_end - start, 1)
+                    target_tokens = chunk[count_from:]
+                    if target_tokens:
+                        n = len(target_tokens)
+                        pred_logits = logits[0, count_from-1:count_from-1+n, :]
+                        log_probs = F.log_softmax(pred_logits, dim=-1)
+                        target_t = torch.tensor(target_tokens).to(self._device)
+                        token_lp = log_probs[range(n), target_t]
+                        total_log_prob += token_lp.sum().item()
+                    
+                    prev_end = end
+                    if end >= len(tokens):
+                        break
+                    start += stride
+                
+                results[i] = total_log_prob
+        
+        # 同步所有 streams
+        for stream in self.streams:
+            stream.synchronize()
+        
+        return results
+
     def generate_until(self, requests):
         """
         用于开放式生成任务，模型需要自己生成答案，直到遇到停止符。
+        支持批量推理和 data parallelism。
+        """
+        if not self.use_data_parallel:
+            # Pipeline parallelism 或单GPU：批量处理
+            return self._generate_batch(requests, self.models[0])
+
+        # Data parallelism：拆分请求到多个模型，并行处理
+        import threading
+        n_models = len(self.models)
+        chunk_size = (len(requests) + n_models - 1) // n_models
+        chunks = [requests[i:i+chunk_size] for i in range(0, len(requests), chunk_size)]
+
+        results_list = [None] * n_models
+        threads = []
+
+        for i, (chunk, model) in enumerate(zip(chunks, self.models)):
+            t = threading.Thread(
+                target=lambda idx, reqs, m: results_list.__setitem__(idx, self._generate_batch(reqs, m)),
+                args=(i, chunk, model)
+            )
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        # 合并结果
+        results = []
+        for r in results_list:
+            if r:
+                results.extend(r)
+        return results
+
+    def _generate_batch(self, requests, model):
+        """
+        批量生成的核心逻辑。
+
+        难点：不同 request 的 stop_seqs 可能不同，需要逐个检查停止条件。
+        策略：先统一生成到 max_new_tokens，再逐个截断。
         """
         results = []
-        for req in requests:
-            # "Q: What is the capital of France?\nA:"
-            # gen_kwargs = {"until": ["\n", "Q:"], "max_gen_toks": 50}
-            context, gen_kwargs = req.args
-            
-            # stop_seqs = ["\n", "Q:"]
-            # 遇到这些字符串就停止
-            stop_seqs = gen_kwargs.get("until", [])
+        device = next(model.parameters()).device
 
-            # shape(1, len(context))
-            input_ids = torch.tensor(self.tok_encode(context), dtype=torch.long).unsqueeze(0).to(self._device)
+        for batch_start in range(0, len(requests), self._batch_size):
+            batch_reqs = requests[batch_start : batch_start + self._batch_size]
 
+            # 1. 分词每条 context
+            batch_contexts = []
+            batch_stop_seqs = []
+            for req in batch_reqs:
+                context, gen_kwargs = req.args
+                batch_contexts.append(self.tok_encode(context))
+                batch_stop_seqs.append(gen_kwargs.get("until", []))
+
+            # 2. 左padding对齐（生成时需要从右边开始）
+            max_len = max(len(c) for c in batch_contexts)
+            pad_id = self.tokenizer.token_to_id("<pad>") if hasattr(self.tokenizer, 'token_to_id') else 0
+            if pad_id is None:
+                pad_id = 0  # fallback
+
+            padded = []
+            attn_masks = []
+            for ctx in batch_contexts:
+                pad_len = max_len - len(ctx)
+                padded.append([pad_id] * pad_len + ctx)
+                attn_masks.append([0] * pad_len + [1] * len(ctx))
+
+            input_ids = torch.tensor(padded, dtype=torch.long).to(device)       # (B, L)
+            attn_mask = torch.tensor(attn_masks, dtype=torch.long).to(device)   # (B, L)
+
+            # 3. 批量生成
             with torch.no_grad():
-                # shape(1, len(context)+self._max_gen_toks)
-                out = self.model.generate(
-                    input_ids, 
-                    max_new_tokens = self._max_gen_toks,
-                    top_k=1, # greedy解码（top_k=1等价于argmax）
-                    temperature=1.0,
+                outputs = model.generate(
+                    input_ids,
+                    attention_mask=attn_mask,
+                    max_new_tokens=self._max_gen_toks,
+                    do_sample=False,  # greedy decoding
+                    pad_token_id=pad_id,
+                    use_cache=True,   # 确保启用 KV cache
                 )
-                
-            # 只去新生成的部分
-            new_tokens = out[0][input_ids.shape[1]:].tolist()
 
-            # 解码字符串
-            generated = self.tok_decode(new_tokens)
+            # 4. 逐样本解码并应用 stop_seqs
+            for i, (ctx_len, stop_seqs) in enumerate(zip([len(c) for c in batch_contexts], batch_stop_seqs)):
+                # 跳过原始 context（包括左padding），只取新生成的部分
+                # outputs[i] 的前 max_len 是 padded context，之后是生成的 token
+                generated_ids = outputs[i][max_len:].tolist()
+                generated_text = self.tok_decode(generated_ids)
 
-            # 截断
-            for stop in stop_seqs:
-                if stop in generated:
-                    # 比如生成了"Paris\nQ: What is..."
-                    # 遇到了 "\n" -> 截断 -> "Paris"
-                    generated = generated[:generated.index(stop)]
-            results.append(generated)
+                # 截断到第一个 stop_seq
+                for stop in stop_seqs:
+                    if stop in generated_text:
+                        generated_text = generated_text[:generated_text.index(stop)]
+                        break
+
+                results.append(generated_text)
+
         return results
                     
 
