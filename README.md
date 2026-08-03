@@ -207,3 +207,58 @@ BF16：符号位 1bit，指数位 8bit，指数偏移量为127，尾数位=16-1-
 *   **落地实践：** 部署高性能 C++ 推理引擎（如 TensorRT）时，通常可以通过校准（Calibration）或量化感知训练，将模型权重安全地映射到 FP16 的范围内，从而在不损失精度的前提下，最大化利用 GPU 的 Tensor Core，轻松达成 200ms 以内的实时延迟要求。
 
 
+
+# git 
+```
+阶段零：首次配置
+派生仓库（Fork）：
+在 GitHub 官方仓库页面点击右上角的 Fork 按钮，将项目完整复制到你的个人账号下。
+
+克隆到本地（Clone）：
+将你账号下的仓库克隆到本地电脑（这会自动被命名为 origin 远端）。
+
+git clone https://github.com/你的账号/continual_learning.git
+cd continual_learning
+
+绑定官方仓库（Upstream）：
+git remote add upstream https://github.com/wytyl13/continual_learning.git
+
+
+阶段一：新建开发任务
+# 1. 切换到main分支，该分支只同步官方最新的代码
+git checkout main
+
+# 2. 把官方最新代码拉取下来
+git pull upstream main
+
+# 3. 基于main分支，创建新分支并切换过去，基于该分支进行修改
+git checkout -b update-readme
+
+
+阶段二：中途同步官方更新
+# 0. 先把手头正在写的代码存起来
+git add .
+git commit -m "wip: save current progress"
+
+# 1 回到main分支
+git checkout main
+
+# 2. 拉取官方最新的更新
+git pull upstream main
+
+# 3. 切回你自己的开发分支
+git checkout update-readme
+
+# 4. 把刚刚拿到的官方最新代码（main），合并进你当前的分支，此时该分支已经包含了官方最新的代码和之前的修改
+git merge main
+
+
+阶段三：提交与申请
+git add .
+git commit -m "feat: complete llama model integration"
+git push origin update-readme
+
+
+最后一步：
+去自己的 GitHub 网页，系统会自动提示你刚才推送了新分支。点击绿色的 Compare & pull request 按钮，填写说明，正式向官方主仓库发起合并申请。
+```
