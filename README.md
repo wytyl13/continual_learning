@@ -1,264 +1,499 @@
-## 预训练数据集
-数据清洗流水线：语言过滤language filtering、质量过滤quality filtering、去重deduplication、隐私脱敏PII removal
-Dolma OLMo
-emergent behavior紧急行为
-The ability to perform tasks that the model wasn't explicitly trained to perform is called an emergent behavior. The capability isn't explicitly taught durinig training but emerges as a nature consequence of the model's exposure to vast quantities of multilingual data in diverse contexts. The fact that GPT models can "learn" the translation patterns between languages and perform translation tasks even though they weren't specifically trained for it demonstrates the benefits and capabilities of these large-scale, generative language models. we can perform diverse tasks without using diverse models for each.
-
-At its core, an embedding is a mapping from discrete objects, such as words, images, or even entire documents, to points in a continuous vector space -- the primary purpose of embeddings is to convert nonnumeraic data into a format that neural networks can process.
-
-While word embeddings are the most common form of text embedding, there are also embeddings for sentences, paragraph, or whole documents. Senrence or paragraph embeddings are popular choices for retrieval-augmented generation. Retrieval-augmented generation combines generation with retrieval to pull relevant information when genearting text, which is a technical that is beyond the scope of this book. Since our goal is to train GPT-like LLMs, which learn to generate text one word at a time, we will focus on word embeddings.
-
-Word embeddings can have varing dimensions, from one to thousands. A higher dimensionality might capture more nuanced relationships but at the cost of computational efficiency.
-
-While we can use pretrained models such as Word2Vec to generate embeddings for machine learning models, LLMs commonly produce their own embeddings that are part of the input layer and are updated during training. The advantage of optimizing the embeddings as part of the LLM training instead of using Word2Vec is that the embeddings are optimized to the specific task and data at hand.
-
-export http_proxy="http://127.0.0.1:7890" https_proxy="http://127.0.0.1:7890" ftp_proxy="http://127.0.0.1:7890" all_proxy="socks5://127.0.0.1:7890" HTTP_PROXY="http://127.0.0.1:7890" HTTPS_PROXY="http://127.0.0.1:7890" FTP_PROXY="http://127.0.0.1:7890" ALL_PROXY="socks5://127.0.0.1:7890"
-
-unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY 
-
-pip install -U huggingface_hub
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download openai-community/gpt2 \
-  --local-dir /mnt/wsl/fast_disk/continual_learning/source/hf/gpt2/124M \
-  --include "*.safetensors" "*.json" "*.txt" "*.model"
-
-
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download openai-community/gpt2-medium \
-  --local-dir /mnt/wsl/fast_disk/continual_learning/source/hf/gpt2/355M \
-  --include "*.safetensors" "*.json" "*.txt" "*.model"
-
-
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download openai-community/gpt2 \
-  --local-dir /root/autodl-tmp/continual_learning_data/source/hf \
-  --include "*.safetensors" "*.json" "*.txt" "*.model"
-
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T \
-  --local-dir /mnt/wsl/fast_disk/continual_learning/source/hf/llama/tiny_llama \
-  --include "*.safetensors" "*.json" "*.txt" "*.model"
-
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T \
-  --local-dir /root/autodl-tmp/continual_learning_data/source/hf/llama/tiny_llama \
-  --include "*.safetensors" "*.json" "*.txt" "*.model"
-
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download meta-llama/Llama-2-7b-hf \
-  --local-dir /root/autodl-tmp/continual_learning_data/source/hf/llama/llama-2-7b \
-  --include "*.safetensors" "*.json" "*.txt" "*.model" --exclude "*.bin"
-
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download NousResearch/Llama-2-7b-hf \
-  --local-dir /root/autodl-tmp/continual_learning_data/source/hf/llama/llama-2-7b \
-  --include "*.safetensors" "*.json" "*.txt" "*.model" --exclude "*.bin"
-
-
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download NousResearch/Meta-Llama-3-8B \
-  --local-dir /root/autodl-tmp/continual_learning_data/source/hf/llama/llama-3-8b \
-  --include "*.safetensors" "*.json" "*.txt" "*.model" --exclude "*.bin"
-
-deepspeed --num_gpus=1 --module training.train_llama
-python -m training.train_llama
-
-
-~/.claude/projects
-
-
-
-
-| 符号分类 (Category) | 符号名称 / 含义 (Meaning) | LaTeX 代码 (Code) | 渲染效果 (Render) |
-| --- | --- | --- | --- |
-| **希腊字母 (Greek)** | 小写基础字母 1 | `\alpha, \beta, \gamma, \delta` | $\alpha, \beta, \gamma, \delta$ |
-|  | 小写基础字母 2 | `\epsilon, \theta, \lambda, \mu` | $\epsilon, \theta, \lambda, \mu$ |
-|  | 小写基础字母 3 | `\pi, \sigma, \phi, \omega` | $\pi, \sigma, \phi, \omega$ |
-|  | 常用大写字母 | `\Gamma, \Delta, \Theta, \Sigma, \Omega` | $\Gamma, \Delta, \Theta, \Sigma, \Omega$ |
-| **代数与运算 (Math)** | 乘, 除, 加减, 减加 | `\times, \div, \pm, \mp` | $\times, \div, \pm, \mp$ |
-|  | 点乘, 星乘, 圆点 | `\cdot, \ast, \circ` | $\cdot, \ast, \circ$ |
-|  | 直和, 张量积 (Kronecker乘积) | `\oplus, \otimes` | $\oplus, \otimes$ |
-|  | 分数, 平方根, $n$次根号 | `\frac{a}{b}, \sqrt{x}, \sqrt[n]{x}` | $\frac{a}{b}, \sqrt{x}, \sqrt[n]{x}$ |
-| **关系与逻辑 (Logic)** | 小于等于, 大于等于, 不等于 | `\leq, \geq, \neq` | $\leq, \geq, \neq$ |
-|  | 约等于, 等价于, 正比于 | `\approx, \equiv, \propto` | $\approx, \equiv, \propto$ |
-|  | 远小于, 远大于 | `\ll, \gg` | $\ll, \gg$ |
-|  | 因为, 所以 | `\because, \therefore` | $\because, \therefore$ |
-|  | 任意, 存在 | `\forall, \exists` | $\forall, \exists$ |
-| **集合与区间 (Sets)** | 属于, 不属于 | `\in, \notin` | $\in, \notin$ |
-|  | 子集, 包含于, 并集, 交集 | `\subset, \subseteq, \cup, \cap` | $\subset, \subseteq, \cup, \cap$ |
-|  | 空集, 无穷大 | `\emptyset, \infty` | $\emptyset, \infty$ |
-|  | 实数集, 整数集 (黑板粗体) | `\mathbb{R}, \mathbb{Z}, \mathbb{N}, \mathbb{C}` | $\mathbb{R}, \mathbb{Z}, \mathbb{N}, \mathbb{C}$ |
-|  | 算法复杂度 / 损失函数 (花体) | `\mathcal{O}, \mathcal{L}, \mathcal{N}` | $\mathcal{O}, \mathcal{L}, \mathcal{N}$ |
-| **微积分 (Calculus)** | 偏导, 梯度 (Nabla) | `\partial, \nabla` | $\partial, \nabla$ |
-|  | 积分, 双重积分, 闭合积分 | `\int, \iint, \oint` | $\int, \iint, \oint$ |
-|  | 连加, 连乘 | `\sum_{i=1}^n, \prod_{i=1}^n` | $\sum_{i=1}^n, \prod_{i=1}^n$ |
-|  | 极限 | `\lim_{x \to \infty}` | $\lim_{x \to \infty}$ |
-| **线性代数 (LinAlg)** | 向量, 粗体向量 (矩阵) | `\vec{x}, \mathbf{X}` | $\vec{x}, \mathbf{X}$ |
-|  | 矩阵范数 (双竖线) | `\Vert x \Vert` | $\Vert x \Vert$ |
-|  | 预测值, 宽帽 (估计值) | `\hat{y}, \widehat{y}` | $\hat{y}, \widehat{y}$ |
-|  | 向量内积 (尖括号) | `\langle x, y \rangle` | $\langle x, y \rangle$ |
-| **修饰与箭头 (Arrows)** | 左箭头, 右箭头, 双向箭头 | `\leftarrow, \rightarrow, \leftrightarrow` | $\leftarrow, \rightarrow, \leftrightarrow$ |
-|  | 推出, 等价 (长箭头) | `\Rightarrow, \Longleftrightarrow` | $\Rightarrow, \Longleftrightarrow$ |
-|  | 上划线, 下划线 | `\overline{AB}, \underline{AB}` | $\overline{AB}, \underline{AB}$ |
-|  | 顶部波浪线, 点导数 (物理/时间) | `\tilde{x}, \dot{x}, \ddot{x}` | $\tilde{x}, \dot{x}, \ddot{x}$ |
-
-
-
-# 现在有以下问题
-```
-项目中很多函数需要进行config的转换：openai模型权重读取的config转换为自定义的gpt2_model config，自定义的config转换为transformers config
-transformers config转换为 自定义config。
-
-还有就是在训练的时候：我可以使用transformers类去加载模型训练，还可以使用自定义model加载模型训练，对应的这两个模型保存的时候config和model配置不一样
-我现在可以加载任何训练模型（包括自定义model训练保存的模型，还有transformers类加载训练的模型），但是我现在无法兼容加载这两个模型，因为这两个模型
-保存的权重命名规则不一样啊？还有config也不一样
-
-还有transformer的config中需要配置eos_token_id pad_token_id这两个参数，但是我的自定义模型架构config配置中没有
-token_ids = model.generate(
-                input_ids=encoded,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                pad_token_id=50256,
-                eos_token_id=50256,
-                do_sample=temperature > 0,
-                temperature=temperature if temperature > 0 else 1.0,
-                top_k=top_k if top_k and temperature > 0 else 50
-            )
-因为model.generate和我的自定义gptmodel中的generate不一样
-
-以上问题帮我完整的分析一下重构思路，我希望大道至简，不希望我的框架做的像transformers一样有很多的判断条件
-```
-
-# BF16 与 FP16 的核心区别
-
-`bf16` (Bfloat16) 和 `float16` (FP16) 都是占用 **16个比特（2个字节）**的半精度浮点数。它们的核心区别在于**对这16个比特的分配策略不同**，这导致了它们在“表达范围”和“表达精度”上的巨大差异。
-
-简单来说：**FP16 选择了更高的精度，而 BF16 选择了更大的范围。**
-
-## 1. 比特位分配对比
-3.14159 * 10^5
-  3.14159 就是“尾数”
-  5 就是“指数”
-  10 是基数（在计算机里基数是 2）
-
-十进制 125 -> 科学计数法 1.25 * 10^2
-
-十进制 6.5 -> 计算机的科学技术法
-  二进制110 -> 十进制6=2^2+2^1
-  二进制0.1 -> 十进制0.5=2^-1
-  二进制110.1 -> 十进制6.5
-
-十进制6.5的二进制存储规则：
-  二进制110.1=1.101*2^2，小数点左移2位，2^2中底数2就是基数，指数2就是指数，1.101中的101就是尾数
-  因此十进制的6.5换算成计算机的科学技术法是1.101*2^2
-  符号是正数对应的符号位0，指数为2，尾数是101，为了同时表示正指数和负指数，在存储
-  指数时，会给真实指数加上一个固定的偏移量，然后再转成二进制存进去。FP32和BF16的偏移量是127，FP16的偏移量是15
-
-单精度float32：符号位 1bit，指数位 8bit，尾数位 23bit。
-  符号位正数是0，负数是1.
-  指数为8bit，真实指数2+127=129，129二进制是10000001，129=2^7+2^0，8bit的第0位置和第7位置为1，其余地方为0。
-  因此二进制是10000001
-  尾数位是23bit，放进去真实二进制101即可（小数是从左往右补）
-  1.101中的整数1不用存储，因为一定是1，在十进制里面这个数字可能是0-9，但是在二进制表示中一定是1
-
-  0 | 10000001 | 10100000000000000000000
-  符号位0表示正数，指数位10000001转换为十进制为129，减去偏移量127等于2，表示小数点向右偏移2位，
-  10100000000000000000000表示1.101，向右偏移2位最终二进制表示为110.1，转换为十进制为2^2+2^1+2^-1=6.5
-
-半精度FP16：符号位 1bit，指数位 5bit，指数偏移为15，尾数位 10bit
-  十进制6.5半精度FP16的存储为：指数为十进制=15+2=17，十进制17二进制表示为=2^4+2^0
-  0 | 10001 | 1010000000
-  10001转换为十进制为17，减去偏移量15等于2，1.101向右偏移2位最终二进制表示为110.1
-
-BF16：符号位 1bit，指数位 8bit，指数偏移量为127，尾数位=16-1-8=7bit
-  十进制6.5 BF16存储为：指数为十进制127+2=29，十进制29二进制表示为=2^7+2^0=128+1=129
-  0 | 10000001 | 1010000
-  将单精度float32从中间截断，只保留前16位就是BF16
-
-比如 1.0 * 2^20，FP32和BF16因为指数上限是127（因为指数位均为8bit，考虑偏移量127，
-8bit的存储的十进制最大值为255，最小值是0，去掉两个特殊情况8bit全为0或者全为1，全为0代表数字0和极其微小的非规格化数字
-全1保留给无穷大和非数字Nan使用，可以使用的指数只有1到254，这是254个指数情况，254是最大的指数状态，再减去127漂移量，
-最大的正指数状态为127，也就是这两个数据类型可以保存的最大数值为尾数全为1的情况下，指数向右偏移127位，可以表示的最小
-状态为1-127=-126）
-
-什么时候指数为是负？比如一个十进制小数0.125=2^-3，二进制形式为0.001，现在要存储二进制0.001，小数点左边必须是1，
-所以0.001=1*2^-3，指数为是-3，尾数位0，考虑指数偏移量，键入时BF16最终偏移后的指数为是-3+127=124=64+32+16+8+4=2^6+2^5+2^4+2^3+2^2
-0 | 01111100 | 0000000
-以上如果这个小数位很大，比如2^-126，其指数位为-126，加上偏移量127等于1，也就是说BF16可以表示的最接近0的正小数为
-0 | 00000001 | 1111111
-该数值的十进制表示为 1.9921875 * 2^-126
-
-
-
-| 数据类型 | 符号位 (Sign) | 指数位 (Exponent) | 尾数位 (Fraction) | 特点 |
-| :--- | :--- | :--- | :--- | :--- |
-| **单精度 FP32** | 1 bit | 8 bit | 23 bit | 标准基准，范围大，精度高。 |
-| **半精度 FP16** | 1 bit | **5 bit** | **10 bit** | **精度较高**，但最大只能表示到 ~65504。 |
-| **大脑浮点 BF16** | 1 bit | **8 bit** | **7 bit** | **动态范围极大**（同 FP32），但精度较低。 |
-
-> **什么是 BF16？**
-> BF16 全称是 Brain Floating Point，最初由 Google Brain 团队为机器学习专门设计。它的设计极其巧妙：直接**生硬地截断** FP32 的后 16 位尾数，保留了和 FP32 完全相同的 8 位指数。这意味着 BF16 能表示的数字范围和 FP32 一模一样（最大到 ~3.4 x 10^38）。
+# Continual Learning for Large Language Models
 
 ---
 
-## 2. 工程部署中的核心差异
+## 1. 为什么选择持续学习这个主题？(预计时长: 8-10 mins)
 
-这两种数据类型在深度学习的训练和推理架构中扮演着截然不同的角色：
+- **核心逻辑/动机：** 技术研发与技术应用是两个层面。3D 打印机是技术研发，在博物馆做文创艺术品是技术应用。大语言模型也是技术研发，但它的终极应用走向了两个方向：一是大参数路线，追求极致智能（GPT-4, Claude）；二是大众化路线，追求生活化陪伴。后者不需要复杂推理能力，只需要记住主人的生活习惯、陪伴主人成长、在需要时给出温馨回复。持续学习是实现大众化路线的关键技术路径。
 
-### 2.1 神经网络训练：为什么大模型偏爱 BF16？
-在训练深度神经网络时，梯度的变化范围极广。如果使用 FP16，由于其最大值只有 65504，非常容易发生**梯度溢出**（Overflow）或下溢出（Underflow），导致训练崩溃（出现 NaN）。
-*   **BF16 的优势：** 拥有和 FP32 一样的动态范围，几乎永远不会溢出。在混合精度训练中，直接使用 BF16 可以省去复杂的“损失缩放”（Loss Scaling）操作，训练极度稳定。目前绝大多数百亿级 LLM（大语言模型）的预训练都采用 BF16。
+- **持续学习的应用价值：**
 
-### 2.2 端侧与实时推理：为什么 TensorRT 常用 FP16？
-在部署边缘侧实时计算机视觉（CV）系统时，通常面对的是推理（Inference）阶段。此时模型的权重已经固定，数值范围是已知且可控的。
-*   **FP16 的优势：** 相比 BF16，FP16 多了 3 个比特的尾数位，**精度更高**。在处理图像数据时，这微小的精度优势有助于更好地保留空间特征和细节。
-*   **落地实践：** 部署高性能 C++ 推理引擎（如 TensorRT）时，通常可以通过校准（Calibration）或量化感知训练，将模型权重安全地映射到 FP16 的范围内，从而在不损失精度的前提下，最大化利用 GPU 的 Tensor Core，轻松达成 200ms 以内的实时延迟要求。
+  **1. 个性化陪伴应用：** 假设每个人的手机里都有一个私有模型。它不需要太多智能，但它记住了你的经历（"去年春节你去了成都"），了解你的习惯（"每天晚上 10 点提醒你关灯"），跟随你一起学习（"你最近在读量子计算的书，我帮你总结笔记"）。这种陪伴型 AI 的核心不是智能，而是记忆与成长能力。持续学习让模型在端侧实时更新，无需上传数据到云端，保护隐私的同时实现真正的个性化。
 
+  **2. 降低技术入场门槛：** 随着模型参数量从 GPT-2 的 1.5B 增长到 GPT-4 的千亿级，预训练成本从数十万美元飙升到数千万美元。资源有限的公司（中小型医疗机构、法律事务所、教育初创公司）逐渐无法融入这场技术浪潮。持续学习提供了一条新路径：基于 Llama 3、Qwen 2.5 等开源基座，用少量领域数据（100MB-1GB）在单卡上持续预训练，获得领域专业能力。这让技术入场成本从"数千万美元的云端集群"降低到"数千美元的单卡环境"。
 
+  **3. 减少版本迭代的重复成本：** 现有大模型的版本更新（GPT-3 → GPT-3.5 → GPT-4，Llama 2 → Llama 3 → Llama 3.1）都需要从头重新预训练，耗费大量重复算力。持续学习允许基于上一代版本做增量训练：保留已学知识，只更新变化部分（新数据、新能力）。例如，Llama 3 在 Llama 2 的基础上继续预训练 15T tokens，而不是重新训练完整的 15T tokens。这种增量式更新可以节省 30-50% 的预训练成本。
 
-# git 
-```
-阶段零：首次配置
-派生仓库（Fork）：
-在 GitHub 官方仓库页面点击右上角的 Fork 按钮，将项目完整复制到你的个人账号下。
+  **4. 知识时效性与领域专业化：** 世界知识是动态变化的。2024 年的医学研究进展、2025 年的法律法规更新、每天的新闻事件，都无法被冻结在预训练阶段的模型参数中。持续学习让模型保持知识的时效性，无需每次都重新预训练千亿参数。同时，通用大模型虽然博学，但在垂直领域（如放射科影像诊断、税法咨询）往往不够专业。持续学习允许在保持通用能力的前提下，注入领域专业知识，实现"通用 + 专业"的双重能力。
 
-克隆到本地（Clone）：
-将你账号下的仓库克隆到本地电脑（这会自动被命名为 origin 远端）。
+  **5. 数据主权与隐私保护：** 当前主流方案（RAG + LoRA）需要将用户数据上传到云端向量数据库，或者定期发送到服务器微调。这在医疗、金融、政务等场景中违反隐私法规（GDPR、HIPAA）。端侧持续学习将所有数据和训练过程保留在本地设备，用户的对话记录、个人偏好、敏感信息永远不离开设备，满足数据主权和隐私保护的刚需。
 
-git clone https://github.com/你的账号/continual_learning.git
-cd continual_learning
+- **总结：**
+  - 持续学习让大语言模型从"云端超级智能"走向"端侧个性化陪伴"，实现技术的大众化应用。
+  - 降低技术入场门槛、减少版本迭代成本、保持知识时效性、保护数据隐私，是持续学习的四大工程价值。
+  - 本项目聚焦资源受限场景（单卡、小数据、端侧），让每个人都能拥有会成长的私有 AI。
 
-绑定官方仓库（Upstream）：
-git remote add upstream https://github.com/wytyl13/continual_learning.git
+- **延伸思考：**
+  1. 在你们行业，大模型的核心应用是什么？
+  2. 你们认为基础模型厂商（OpenAI、Meta、阿里）是如何应对版本迭代造成的重新训练问题的？
+  3. 你们认为大模型的终极应用是什么？
 
+---
 
-阶段一：新建开发任务
-# 1. 切换到main分支，该分支只同步官方最新的代码
-git checkout main
+## 2. 载体：大语言模型 (预计时长: 8-10 mins)
 
-# 2. 把官方最新代码拉取下来
-git pull upstream main
+- **核心逻辑/动机：** 持续学习需要选择合适的载体。传统小模型（BERT 110M、DistilBERT 66M）是任务专用模型：BERT 只能做分类和序列标注。大语言模型（GPT、LLaMA、Qwen）是通用基座：通过"提示词 + Next Token 预测"可以实现翻译、摘要、问答、代码生成等任务。选择大语言模型作为持续学习载体，因为它具备通用性、生态完善、架构简洁三大优势。
 
-# 3. 基于main分支，创建新分支并切换过去，基于该分支进行修改
-git checkout -b update-readme
+- **为什么选择大语言模型？**
 
+  **1. 通用性强：统一范式覆盖多元场景**
 
-阶段二：中途同步官方更新
-# 0. 先把手头正在写的代码存起来
-git add .
-git commit -m "wip: save current progress"
+  小模型与大模型的区别在架构设计哲学：
 
-# 1 回到main分支
-git checkout main
+  - **小模型：** BERT 需要为每个任务设计专门的输出头（分类头、序列标注头、问答头）。处理情感分类、命名实体识别、文本摘要时，需要训练三个独立模型。模型无法泛化到未见过的任务类型。
 
-# 2. 拉取官方最新的更新
-git pull upstream main
+  - **大模型：** GPT 系列通过 Next Token Prediction 将所有任务统一为"给定上文，预测下一个词"：
 
-# 3. 切回你自己的开发分支
-git checkout update-readme
+  ```
+  翻译：Prompt: "中文：持续学习\n英文：" → 输出: "Continual learning"
+  代码：Prompt: "def fibonacci(n):" → 输出: "\n    if n <= 1: return n"
+  工具调用：Prompt: "查询北京天气" → 输出: '{"tool":"weather","city":"北京"}'
+  图像识别：Prompt: "<image>这是什么动物？" → 输出: "这是一只猫"
+  图像分割：Prompt: "<image>分割出图中的人" → 输出: "<seg_mask>person_mask_001</seg_mask>"
+  ```
 
-# 4. 把刚刚拿到的官方最新代码（main），合并进你当前的分支，此时该分支已经包含了官方最新的代码和之前的修改
-git merge main
+  统一范式的价值：学习新领域（医疗、法律）或新任务（工具调用、图像理解）时，无需修改架构，继续预训练新数据即可。
 
+  **2. 生态完善：开放权重与评估标准**
 
-阶段三：提交与申请
-git add .
-git commit -m "feat: complete llama model integration"
-git push origin update-readme
+  - **开放权重：** LLaMA（7B/13B/70B）、Qwen 2.5（0.5B-72B）、Mixtral 8x7B 全面开源，允许商用。研究者直接在这些基座上做持续学习实验，无需从零预训练。
 
+  - **数据多元化：** RedPajama（1.2T tokens）、The Pile（800GB）、PubMed（医疗）、ArXiv（科学）、GitHub（代码）为持续学习提供新知识来源。
 
-最后一步：
-去自己的 GitHub 网页，系统会自动提示你刚才推送了新分支。点击绿色的 Compare & pull request 按钮，填写说明，正式向官方主仓库发起合并申请。
-```
+  - **框架完善：** Transformers（模型加载与微调）、Accelerate（分布式训练）、DeepSpeed（ZeRO 优化）、vLLM（高效推理）提供标准化的训练推理工具链。
+
+  - **评估标准：** MMLU（多任务语言理解）、HellaSwag（常识推理）、ARC（科学问答）、LAMBADA（长文本预测）等通用 Benchmark，以及 OpenCompass、lm-evaluation-harness 等评估框架让持续学习效果可量化、可对比。
+
+  **3. 架构优雅：大道至简**
+
+  ```
+  LLaMA 架构（约 500 行 PyTorch）：
+    - Token Embedding
+    - N 个 Transformer Block:
+      - Multi-Head Attention + RoPE
+      - Feed-Forward + SwiGLU
+      - RMSNorm
+    - LM Head
+
+  YOLOv8 架构（约 3000+ 行）：
+    - Backbone（CSPDarknet + C2f 模块）
+    - Neck（PAN-FPN 多尺度融合）
+    - Head（分类头 + 回归头 + 锚框匹配）
+    - 损失函数（CIoU + DFL + BCE）
+  ```
+
+  Transformer 优势：
+  - 统一组件：从 1.5B 到 405B 参数，架构几乎不变
+  - 单一损失：Next Token Cross-Entropy，训练稳定
+  - 易于修改：研究者快速定位 Attention/FFN 参数，设计稀疏更新策略
+
+  对比：YOLOv8 需要针对不同任务设计专门的 Head 和损失函数，持续学习时需要处理多头平衡、锚框迁移等问题。
+
+- **总结：**
+  - Next Token 预测统一了文本、代码、工具调用、图像识别等多元任务，天然适合持续学习。
+  - 开放权重、多元数据、标准化评估为持续学习研究提供基础设施。
+  - Transformer 架构简洁，持续学习方法实现成本低。
+
+- **延伸思考：**
+  1. 大语言模型的终极应用是什么？
+  2. Next Token 预测这种统一范式的极限在哪里？是否存在它无法解决的任务类型？是否存在比它更通用的范式？
+  3. 有什么比 Next Token 更适合持续学习的范式？
+
+---
+
+## 3. 拨云见日：持续学习界定 (预计时长: 8-10 mins)
+
+- **核心逻辑/动机：** 持续学习（Continual Learning）在学术界有多种定义。明确界定研究边界是第一步。
+
+- **持续学习的三大分类：**
+
+  **1. 任务增量学习（Task-Incremental Learning, TIL）**
+
+  依次学习任务序列 T1 → T2 → T3，测试时告知任务 ID。
+
+  ```
+  示例：先学习情感分类，再学习命名实体识别
+  测试时明确告知："这是情感分类任务" → 模型切换到对应输出空间
+  ```
+
+  **2. 类增量学习（Class-Incremental Learning, CIL）**
+
+  依次学习新类别，测试时从全部类别中预测。
+
+  ```
+  示例：阶段 1 学习猫/狗分类，阶段 2 学习飞机/船分类
+  测试时不告知类别来源，需从{猫、狗、飞机、船}中预测
+  ```
+
+  **3. 领域增量学习（Domain-Incremental Learning, DIL）**
+
+  在新数据分布上持续训练，包括：
+  - **领域适配**：通用文本 → 医疗文本 → 法律文本（数据分布变化）
+  - **新知识注入**："Hopfield 在 2024 年获得诺贝尔物理学奖"（新事实编码）
+  - **时序知识更新**：2023 年医学指南 → 2024 年医学指南 → 2025 年医学指南（知识迭代）
+
+  ```
+  本质：模型持续接收新数据流，编码新信息，同时保持已有能力
+  ```
+
+- **大语言模型持续学习研究现状：**
+
+  **1. 持续预训练（Continual Pre-training）**
+
+  Don't Stop Pretraining (Gururangan et al., ACL 2020) 在特定领域上继续预训练 RoBERTa，验证了领域持续预训练可显著提升下游任务性能，通用能力保持率达 95% 以上。
+
+  **2. 序列微调（Sequential Fine-tuning）**
+
+  LFPT5 (Qin & Joty, NAACL 2022) 研究了 T5 模型在多任务序列微调中的遗忘问题，提出通过任务相关性建模减少负迁移。
+
+  **3. 增量预训练（Incremental Pre-training）**
+
+  LLaMA 架构的持续预训练在学术界得到验证：Domain Adaptation of Llama3 (arXiv 2024) 和 Efficient Continual Pre-training by Mitigating the Stability Gap (arXiv 2024) 系统研究了在新领域数据上的增量训练策略。工业界如字节跳动发布 Industrial LLMs 技术报告，强调生产环境中模型必须持续更新而非重新训练。
+
+  **4. 知识编辑（Knowledge Editing）**
+
+  ROME (Meng et al., NeurIPS 2022) 和 MEMIT (Meng et al., ICLR 2023) 通过定位和修改特定参数来更新单个事实，避免大规模重训练。
+
+  **5. 机理层面对齐（Mechanistic Alignment）**
+
+  诠信全译智能科技提出了不同于传统"输出层面对齐"的新范式。他们认为大模型的核心机理具有稀疏性（模型推理只需约 50 个词组相关性即可输出正确结果）和跨架构通用性（不同模型在不同数据上会学习到相同的机理本质）。通过机理层面对齐而非单纯的输出对齐，可以显著降低训练成本、提升可解释性和可控性。这种全局机理解释方法区别于 Anthropic、Google 基于单个神经元的局部解释，为持续学习提供了新的理论视角：如果能识别和保护核心机理，持续学习时只需对齐机理层而非重新拟合所有参数。
+
+- **本项目的聚焦点：领域增量学习（Domain-Incremental Learning）**
+
+  **定义：** 在新领域数据（医疗、法律、个人对话）上继续训练大语言模型，使其获得领域专业能力，同时保持通用能力。
+
+  **为什么聚焦领域增量学习？**
+
+  1. **大语言模型的天然范式：** 大语言模型通过 Next Token 预测统一了所有任务，不存在"切换任务"的概念。领域增量学习（持续在新数据上预测 Next Token）是最自然的持续学习范式。
+
+  2. **实际应用需求：** 通用大模型虽然博学，但在垂直领域（放射科诊断、税法咨询、个人记忆）往往不够专业或时效。领域持续学习让模型在保持通用能力的前提下，持续注入专业知识和新知识。
+
+  3. **覆盖多种学习场景：** 领域增量学习涵盖了领域适配（医疗、法律）、新知识注入（新事实、新概念）、时序更新（知识迭代）等多种实际需求，是最具实用价值的持续学习类型。
+
+  **要解决的核心问题：**
+  - **灾难性遗忘：** 新领域数据训练后，通用任务（常识推理、代码生成）性能下降
+  - **知识冲突：** 新领域术语与通用知识的语义冲突（如"python"在编程和生物领域的不同含义）
+  - **选择性遗忘：** 模型需要具备适当的遗忘能力，既能长期保留重要知识，也能淡化过时信息或删除隐私数据
+  - **知识巩固：** 重要知识需要长期保留并能灵活迁移到新场景
+  - **小样本学习能力：** 持续学习场景下新数据量极少（单条对话、少量文档），模型必须从极少样本中有效编码新知识，而非依赖海量数据反复曝光
+
+- **总结：**
+  - 持续学习有多种范式（TIL/CIL/DIL），本项目聚焦**领域增量学习**。
+  - 领域增量学习是大语言模型最自然的持续学习范式，覆盖领域适配、新知识注入、时序更新等多种场景。
+  - 核心挑战包括灾难性遗忘、知识冲突、选择性遗忘、知识巩固、小样本学习能力五个维度。
+
+- **延伸思考：**
+  1. 人类学习新领域知识时如何避免遗忘？海马体-新皮层的记忆巩固机制能否启发模型设计？
+  2. 在特定领域训练后，模型的 Attention 层和 FFN 层哪个变化更大？这能否揭示知识存储的位置？
+  3. 如果机理层面对齐可以识别模型的核心推理机制，是否可以通过冻结机理层、只更新表层参数来实现持续学习？
+  4. 如何量化"重要知识"？模型参数的梯度大小、激活频率、还是下游任务性能贡献？
+
+---
+
+## 4. 切入点：基于预训练基座的持续学习 (预计时长: 8-10 mins)
+
+- **核心逻辑/动机：** 持续学习可以在大模型训练链路的任意环节切入——继续预训练、序列 SFT、持续 RLHF 都是实现路径，且数据回放、优化器约束、架构扩展等持续学习策略均可作用于这些环节（具体策略详见下一课件）。本项目选择在**预训练基座**环节切入。
+
+- **大语言模型的训练链路：**
+
+  ```
+  原始语料 → [数据清洗] → [预训练] → Base Model → [SFT] → Instruct Model → [RLHF/DPO] → Chat Model → [量化/部署] → 产品
+  ```
+
+  - **预训练：** Next Token Prediction，自监督，万亿 tokens，输出 Base Model——会续写文本，不会对话
+  - **SFT：** 拟合<指令, 回复>对，有监督，数千~百万条，让 Base Model 学会对话格式
+  - **RLHF/DPO：** 人类偏好对齐，让模型输出更安全、更有帮助
+  - **部署：** 量化、蒸馏、vLLM 推理优化
+
+- **预训练 vs SFT：本质区别**
+
+  | 维度 | 预训练 | SFT |
+  |------|--------|-----|
+  | 训练目标 | Next Token Prediction（自监督） | 拟合<指令, 回复>对（监督学习） |
+  | **Loss 计算范围** | **序列中每一个 token 都计算 loss** | **只计算答案部分的 loss，prompt 和左侧 padding 被 mask 掉** |
+  | 学习内容 | 参数化知识（世界知识编码进参数） | 任务格式（如何响应指令） |
+  | 适合知识类型 | 通用基础知识、需要多角度理解的领域知识 | 边界清晰、问法固定的特定事实 |
+  | 数据 | 自然文本，无需标注，万亿 tokens | 人工标注指令对，数千~百万条 |
+  | 训练成本 | 极高（但知识来源广泛，数据易得） | 低于预训练全量，但高质量标注数据稀缺 |
+  | 泛化能力 | 强：换角度提问仍能作答 | 弱：只记住训练集里的问答模式 |
+
+  这个 loss 计算范围的差异是两者知识编码能力不同的**根本原因**：
+
+  ```
+  预训练（全 token loss）：
+    输入："特朗普在 2024 年赢得了美国大选，成为..."
+    每个 token 都产生梯度：模型从完整上下文中学习
+    → 知识被编码进处理整段语义的参数中，泛化能力强
+
+  SFT（答案部分 loss）：
+    prompt：  "2024 年美国大选结果是什么？"  ← 不产生梯度（masked）
+    答案：    "特朗普当选"                    ← 只有这里产生梯度
+    → 模型只被优化成"输出这个答案"，对问题的理解不被强化
+  ```
+
+  这也解释了 SFT 的边界优势：答案 token 上的 loss 高度集中，少量 Q&A 对就能让模型记住特定事实；但代价是对上下文的深层理解被截断，换个问法就失效。
+
+- **知识注入的边界讨论：SFT 并非总处于劣势**
+
+  这里有一个重要的反例值得辨析。
+
+  对于**边界清晰的事实性问题**（如"特朗普哪年当选美国总统"），SFT 的 Q&A 格式反而更高效：模型的 attention 机制在 loss 计算时直接聚焦在答案 token 上，少量 Q&A 对即可让模型记住该事实。而持续预训练方式需要让模型在海量自然文本中反复见到这个事实才能记住，样本量需求远高于 SFT。
+
+  ```
+  注入事实："特朗普在 2024 年再次当选美国总统"
+
+  SFT 方式（数十条 Q&A 对）：
+    Q: "2024 年美国总统是谁？" → A: "特朗普"  ✓  少量样本即可记住
+
+  预训练方式（同等条数自然文本）：
+    大量文本后模型可能仍记不住这个具体事实              ✗  需要更多样本
+  ```
+
+  但 SFT 的优势止步于此——它只记住了见过的问法，泛化能力差：
+
+  ```
+  SFT 后：
+    Q: "2024 年当选的美国总统叫什么？"  → A: "特朗普"  ✓（训练集里有）
+    Q: "谁赢得了 2024 年美国大选？"     → A: 可能答不出 ✗（换了问法）
+    Q: "特朗普上一次当选是哪年？"       → A: 可能混淆   ✗（需要推理）
+
+  预训练后（Zhong et al., EMNLP 2023）：
+    换任何角度提问都能泛化作答             ✓
+  ```
+
+  **结论：** SFT 擅长注入边界清晰、问法固定的事实；预训练擅长注入需要泛化、推理、多角度理解的知识。持续学习的目标是让模型**读完一段内容后能从不同角度灵活运用知识**，而不是死记硬背某几条问答——这正是预训练的能力边界，而非 SFT 的。
+
+- **为什么选择预训练基座作为持续学习切入点？**
+
+  **1. 持续学习的目标是泛化性知识更新，不是事实记忆**
+
+  端侧持续学习的核心场景——领域知识注入（医疗、法律）、个人记忆积累、知识时序更新——需要的是模型真正"理解"新知识并能灵活运用，而非记住特定 Q&A 模式。SFT 的边界优势在这里不成立。
+
+  **2. 预训练是知识的根基层**
+
+  模型的泛化能力来自预训练，SFT 只是激活已有能力的格式适配层（LIMA 证明：1000 条高质量 SFT 数据就能激活对话能力，SFT 能力来自基座而非新知识）。预训练知识过时，SFT 无法补救。
+
+  **3. 预训练持续学习做好后，下游 SFT 成本大幅下降**
+
+  Gururangan et al. (ACL 2020)：先做领域预训练，下游 SFT 所需数据降到 1/10，且性能更高。预训练层面解决知识更新，整体链路成本最优。
+
+  **4. 端侧数据天然适配预训练，不适合 SFT**
+
+  端侧用户数据（个人对话、私有文档）无法标注成高质量<指令, 回复>对，但可以直接作为自然文本做持续预训练，数据"用完即丢"，不需要上传云端。
+
+- **总结：**
+  - 大模型训练链路：预训练（知识） → SFT（格式） → RLHF（对齐） → 部署，持续学习可切入任意环节。
+  - SFT 注入边界清晰的事实更高效；预训练注入需要泛化和推理的知识更高效。两者各有适用边界。
+  - 本项目聚焦预训练基座：目标是泛化性知识更新，预训练做好后 SFT 成本降至 1/10，且端侧数据天然适配。
+
+- **延伸思考：**
+  1. 能否把预训练的泛化优势和 SFT 的事实记忆效率结合？（提示：合成数据生成的角度）
+  2. 边界清晰的 SFT 事实注入与预训练知识发生冲突时，哪个会"赢"？
+  3. 继续预训练时混入少量指令数据（Llama 3 的做法），对持续学习的遗忘问题有何影响？
+  4. SFT+RAG 是否优于持续学习？
+
+---
+
+## 5. 研究视角：类脑持续学习架构 (预计时长: 8-10 mins)
+
+- **核心逻辑/动机：** 前4节明确了持续学习的五个核心挑战：**灾难性遗忘**（学新忘旧）、**稀疏更新**（如何只更新少数参数而非全局）、**选择性遗忘**（主动淡化过时或隐私信息）、**知识巩固**（让重要知识长期稳定保留）、**小样本学习能力**（极少数据下有效编码新知识）。这五个问题环环相扣，现有方法各自击破其中一点，却无法在算力与数据双重受限下统一解决。本节从**网络架构**角度切入，以生物大脑为参照，探讨一条新的研究路线。
+
+---
+
+- **现有方法为什么不够用：**
+
+  **1. 正则化方法（如 EWC）→ 部分解决灾难性遗忘，但存在两个根本限制**
+
+  EWC 通过 Fisher 信息矩阵保护旧任务的重要参数。但：其一，计算 Fisher 矩阵本身**需要旧任务的数据**——当旧数据因隐私、安全或存储限制而无法获取时，这一方法无从落地；其二，它只能"尽量不忘"，没有任何机制支持**主动遗忘**。此外 Fisher 矩阵的计算代价随参数量二次增长，在7B+ 模型上不可行。
+
+  **2. 数据回放（如 Experience Replay）→ 缓解灾难性遗忘，但依赖旧数据**
+
+  混合历史样本防遗忘，代价是必须存储旧数据。旧数据一旦无法获取，这条路就封死了；端侧设备存储有限；且回放无法支持选择性遗忘——想主动删除的知识也一并保留着。
+
+  **3. 稀疏更新（局部更新）→ 核心思路，但现有实现存在瓶颈**
+
+  稀疏更新的直觉对：只激活与新知识相关的参数子集，旧知识所在参数不碰。问题在于**如何识别"相关参数子集"**。
+
+  一个自然的联想是 MoE（混合专家模型）：不同 Expert 处理不同知识，看似天然隔离。但 MoE 解决的是**算力效率**问题，不是持续学习问题。它的 Router（路由器）本身是标准的可微线性层，用全局 Loss 和反向传播训练——新任务到来时，Router 权重照样被梯度冲刷，旧任务的路由逻辑发生漂移。MoE 没有任何机制保证"旧 Expert 的权重在新任务训练时不被更新"。MoE 是架构上的算力分工，不是知识上的持续保护。
+
+  **4. 以上方法均未解决小样本学习能力**
+
+  无论哪种方法，在极少数据（单条对话、少量文档）下稳定学习新知识，目前仍是开放问题。小样本下梯度信号微弱，噪声比大，模型既可能学不稳新知识，也可能噪声梯度不可控地破坏旧知识。
+
+---
+
+- **类脑的切入视角：**
+
+  生物大脑是目前已知在自然界中被验证过的"终身学习最优解"，它同时回应了上述五个挑战：
+
+  ```
+  灾难性遗忘 → 海马体-新皮层分工：快速编码 vs 慢速巩固，新信息不直接覆盖旧皮层
+  稀疏更新   → 稀疏编码原则：任意时刻只有 1-5% 神经元激活，不同知识激活不重叠的子集
+  选择性遗忘 → 突触弱化机制：低频激活的突触连接自然衰减，重要记忆反复激活得到强化
+  知识巩固   → 睡眠期记忆巩固：海马体短期记忆在慢波睡眠中反复重激活，逐步写入新皮层
+  小样本学习 → 单次绑定（One-shot Binding）：海马体能从单次事件中形成稳定的情节记忆
+  ```
+
+  当前大模型的架构与生物大脑的差距在于：**所有参数都被同等对待，任何训练都是全局更新**。没有快/慢分离，没有稀疏路由，没有突触强化与弱化的区分，也没有主动遗忘的机制。
+
+  一个值得探索的研究方向是：能否在网络架构层面引入类似生物大脑的这些特性？让不同的参数子集承担不同的功能角色（快速响应 vs 长期记忆），让更新本身是稀疏的而非全局的，让"遗忘"成为可控的主动行为而非被动副作用。
+
+  类比大人与小孩打弹珠的差异：大人记住精确的计算公式（量化规则），环境变化时公式全部失效；小孩只记住"投入越多 → 卡片越多"的单调趋势（非量化规则），环境参数改变后趋势依然成立。深度网络当前全部是"大人"——过度依赖精确数值拟合。是否可以在架构中引入"小孩"的直觉路径，让部分参数只记录方向和趋势而非精确数值，以此让局部更新更自然地发生？这是一个开放的研究方向，而非已有定论的结论。
+
+---
+
+- **小 Batch 的额外挑战：**
+
+  持续学习天然是小数据问题。端侧场景每天产生的用户对话约 5000 tokens，而 GPT-2 预训练需要 40GB——差距 800 万倍。训练的本质是找全局最优解，依赖足够大的 Batch 获得准确的梯度估计。小 Batch 下：
+
+  - 梯度信号弱，新知识学不稳
+  - 梯度含噪声，对旧参数的破坏方向不可控
+  - 数据量不足，模型难以区分"新知识"和"噪声"
+
+  这意味着任何持续学习方案都必须回答：如何在极少数据下既学到新知识，又不损坏旧知识？类脑架构对此的启发是：不在小 Batch 上直接更新基座参数，先让"海马体模块"快速响应，积累到一定量后再决定是否巩固到基座——对应神经系统睡眠期间的记忆巩固机制。
+
+---
+
+- **总结：**
+  - 现有方法（EWC/回放/MoE 路由）都无法统一解决五个核心挑战；EWC 和回放都依赖旧数据，在旧数据无法获取的场景直接失效；MoE 解决算力分工，不解决持续保护问题。
+  - 生物大脑通过海马体-新皮层分工、稀疏编码、突触弱化与睡眠巩固、单次绑定，同时处理了五个挑战，是架构设计的参照系。
+  - 从网络架构层面引入快/慢分离、稀疏局部更新、量化与非量化规则的结合等类脑机制，是一个尚待验证但理论上更根本的研究方向。
+
+- **延伸思考：**
+  1. 选择性遗忘如何量化——什么是"重要知识"？激活频率、梯度幅度，还是下游任务贡献度？
+  2. 生物大脑的稀疏编码是进化的结果，深度网络能否通过训练自发学出稀疏激活模式，还是必须在架构上强制施加？
+  3. 小 Batch 下的梯度噪声对持续学习是纯粹的障碍，还是某种意义上的隐式正则化？
+
+---
+
+## 6. 具体实施：第一阶段工程路线 (预计时长: 8-10 mins)
+
+- **核心逻辑/动机：** 前5节完成了问题定义与研究方向的确立。本节进入工程落地，明确第一阶段（预训练持续学习）的具体实施步骤。研究思路是：以 PyTorch 复现经典开源模型架构为基础，在深入理解现有大模型内部结构的前提下，针对**前馈层（FFN）等知识存储模块**尝试类脑架构优化（该优化方向后续实证验证），同时构建统一的训练与评估体系。
+
+---
+
+- **三阶段研究路线（简览）：**
+
+  | 阶段 | 场景 | 核心目标 |
+  |------|------|---------|
+  | 第一阶段 | 云端，离线，批量 | 预训练持续学习，防灾难性遗忘 |
+  | 第二阶段 | 单卡，小数据 | 资源受限下的高效持续学习 |
+  | 第三阶段 | 流式数据，端侧 | 在线持续学习与个性化部署 |
+
+  首先聚焦**第一阶段**。
+
+---
+
+- **实施步骤：**
+
+  **Step 1：复现经典开源模型架构（理解基座）**
+
+  持续学习的优化对象是模型内部结构，复现是前提：不了解 FFN 层的参数组织方式，无从设计局部更新机制。
+
+  以下为代表性模型的复现计划（不限于此）：
+
+  | 顺序 | 模型 | 架构关键点 |
+  |------|------|-----------|
+  | 1 | GPT-2 | 标准 Transformer Decoder，MHA + FFN + LayerNorm，建立基线认知 |
+  | 2 | LLaMA 1/2/3 | RoPE + SwiGLU + RMSNorm + GQA，现代开源模型标配 |
+  | 3 | Qwen 2.5 | 中英文最强开源基座，覆盖 0.5B-72B 全参数段，实验首选载体 |
+  | 4 | Mistral / Mixtral | 滑动窗口注意力 + MoE，验证稀疏架构与持续学习的交互 |
+  | 5 | Mamba / Jamba | 线性注意力/SSM-Transformer 混合，探索非 Attention 架构的遗忘特性 |
+
+  复现目标不是重新发明，而是：
+  - 完全掌握每一层的参数维度和数据流动
+  - 能够精确定位 FFN 层中知识存储的位置
+  - 为后续架构改造提供可控的实验基座
+
+  **Step 2：构建统一训练框架**
+
+  训练框架需同时支持自定义模型和 transformers 加载的模型，以便用官方权重做对照组：
+
+  ```
+  框架设计：
+    ModelType.CUSTOM      → 自定义 PyTorch 模型（实验组，可改架构）
+    ModelType.TRANSFORMERS → transformers 加载的官方模型（对照组）
+
+  LoadMode 三档：
+    SCRATCH    → 随机初始化，从零预训练
+    PRETRAINED → 加载官方预训练权重，做持续预训练
+    CONTINUAL  → 加载上一次持续学习的 checkpoint，继续训练
+
+  显存优化（已配置）：
+    Accelerate + DeepSpeed ZeRO-3
+    支持 CPU Offload、多卡并行
+  ```
+
+  **Step 3：构建评估体系（lm-eval）**
+
+  评估需回答两个问题：新知识学到了多少？旧知识遗忘了多少？
+
+  ```
+  通用能力保持（旧知识）：
+    MMLU       → 多任务语言理解（57个学科）
+    HellaSwag  → 常识推理
+    ARC        → 科学问答
+
+  新领域迁移（新知识）：
+    在目标领域的下游任务上测试持续预训练后的性能提升
+
+  对照组设计：
+    HF 官方模型（基准线）
+    自定义复现模型 + 预训练权重（验证复现正确性）
+    自定义改造模型 + 持续训练（实验组）
+  ```
+
+  **Step 4：构建持续学习评估数据集**
+
+  标准 lm-eval 测的是通用能力，持续学习需要专项评估：
+
+  ```
+  数据集构成：
+    旧知识探针：持续训练前模型能正确回答的题目集合
+    新知识探针：持续训练注入的新领域知识的测试题
+    知识冲突探针：新旧知识在语义上存在重叠的问题（测试冲突处理能力）
+
+  核心指标：
+    前向迁移（Forward Transfer）：新领域任务性能提升
+    后向遗忘（Backward Forgetting）：旧任务性能下降幅度
+    参数效率：更新参数占总参数的比例
+  ```
+
+  **Step 5：持续预训练 vs SFT 对比实验**
+
+  验证第4讲的核心论点——预训练注入的知识泛化能力优于 SFT：
+
+  ```
+  实验设计：
+    同一批新领域数据（100MB）
+    方案A：持续预训练（自监督，全 token loss）
+    方案B：将数据转换为 Q&A 对后做 SFT
+    方案C：方案A + 少量 SFT（Llama 3 的做法）
+
+  评估维度：
+    - 换角度提问的泛化能力
+    - 旧任务的遗忘率
+    - 所需数据量（数据效率）
+  ```
+
+---
+
+- **研究优化方向（待实证）：**
+
+  在完成以上工程基础设施之后，针对 FFN 层的架构改造将作为持续学习的核心实验变量。研究假设是：FFN 层是大模型知识存储的主要场所（Geva et al., 2021 证明 FFN 层行为类似 key-value 记忆库），因此在 FFN 层引入类脑的稀疏更新机制，比在全网络施加正则化更有针对性、代价更低。
+
+  具体改造方向将在后续实验中逐步明确和验证。
+
+---
+
+- **总结：**
+  - 第一阶段的实施分5步：架构复现 → 统一训练框架 → 评估体系 → 专项数据集 → 对比实验。
+  - 自定义模型与 transformers 模型并行维护，前者用于架构改造实验，后者作为基准对照。
+  - 开源模型复现顺序：GPT-2（完成）→ LLaMA（完成）→ Qwen 2.5 → Mistral/Mixtral → Mamba/Jamba -> ...，每一步都为 FFN 层的持续学习改造提供更丰富的实验基座。
+
+- **延伸思考：**
+  1. FFN 层改造后，权重如何从自定义格式转换回 HF 格式以使用 lm-eval 评估？
+  2. 持续预训练时，学习率应从头设置还是使用热重启（warm restart）？对遗忘的影响？
+  3. 评估数据集中"旧知识探针"如何构建——用持续训练前的模型输出作为 ground truth 是否合理？
+
+---
