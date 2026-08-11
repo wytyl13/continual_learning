@@ -15,3 +15,4 @@ lm_eval
 datasets
 dotenv
 bitsandbytes
+huggingface_hub[cli]
